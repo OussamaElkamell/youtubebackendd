@@ -35,10 +35,14 @@ mongoose.connect(process.env.MONGODB_URI, {
 
 // Configure middleware
 app.use(helmet());
-app.use(cors({
-  origin: '*',  // Allow requests from any origin
-  credentials: true
-}));
+app.use(
+  cors({
+    origin: "https://youtubefront.vercel.app", // Allow frontend domain
+    credentials: true, // Allow cookies if needed
+    methods: ["GET", "POST", "PUT", "DELETE"], // Allowed methods
+    allowedHeaders: ["Content-Type", "Authorization"], // Allowed headers
+  })
+);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
