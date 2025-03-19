@@ -284,9 +284,11 @@ const addAccount = async (req, res, next) => {
     });
     
     // Add to user's YouTube accounts
-    await req.user.updateOne({
-      $push: { youtubeAccounts: newAccount._id }
-    });
+    await UserModel.updateOne(
+      { _id: req.user.id },
+      { $push: { youtubeAccounts: newAccount._id } }
+    );
+    
     
     res.status(201).json({
       message: 'Account added successfully',
