@@ -35,10 +35,22 @@ mongoose.connect(process.env.MONGODB_URI, {
 
 // Configure middleware
 app.use(helmet());
-app.use(cors({
+const corsOptions = {
   origin: process.env.CLIENT_URL || 'http://localhost:4000',
-  credentials: true
-}));
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
+
+// Add COOP and COEP headers for correct cross-origin interactions
+app.use((req, res, next) => {
+  // Allow opener interaction between the same origin and the popup window
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+  // Ensure that cross-origin resources are allowed and can be embedded
+  res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+  next();
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
