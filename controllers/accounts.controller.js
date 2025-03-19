@@ -1,8 +1,8 @@
-
 const { YouTubeAccountModel } = require('../models/youtube-account.model');
 const { ProxyModel } = require('../models/proxy.model');
 const { refreshTokenIfNeeded, getYouTubeClient } = require('../services/youtube.service');
 const { google } = require('googleapis');
+const { OAuth2Client } = require('google-auth-library');
 
 /**
  * Get all YouTube accounts for the authenticated user
@@ -215,11 +215,27 @@ const verifyAccount = async (req, res, next) => {
  */
 const addAccount = async (req, res, next) => {
   try {
-    const { accessToken, refreshToken, email, proxy } = req.body;
+    const { credential, proxy } = req.body;
     
-    if (!accessToken || !refreshToken || !email) {
-      return res.status(400).json({ message: 'Missing required credentials' });
+    if (!credential) {
+      return res.status(400).json({ message: 'Missing required credential' });
     }
+    
+    // Verify the token with Google
+    const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+    
+    // Verify the token and get user info
+    const ticket = await client.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID
+    });
+    
+    const payload = ticket.getPayload();
+    if (!payload) {
+      return res.status(400).json({ message: 'Invalid credential' });
+    }
+    
+    const { email, sub: googleId, name, picture } = payload;
     
     // Check if account already exists for this user
     const existingAccount = await YouTubeAccountModel.findOne({
@@ -228,11 +244,9 @@ const addAccount = async (req, res, next) => {
     });
     
     if (existingAccount) {
-      // Update the existing account
-      existingAccount.google.accessToken = accessToken;
-      existingAccount.google.refreshToken = refreshToken;
-      existingAccount.google.tokenExpiry = new Date(Date.now() + 3600 * 1000); // 1 hour
+      // Update the existing account with new info
       existingAccount.status = 'active';
+      existingAccount.google.id = googleId;
       await existingAccount.save();
       
       return res.json({
@@ -240,32 +254,6 @@ const addAccount = async (req, res, next) => {
         account: existingAccount
       });
     }
-    
-    // Set up the OAuth client with the tokens
-    const oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
-      process.env.GOOGLE_REDIRECT_URI
-    );
-    
-    oauth2Client.setCredentials({
-      access_token: accessToken,
-      refresh_token: refreshToken
-    });
-    
-    // Get the YouTube channel info
-    const youtube = google.youtube('v3');
-    const channelResponse = await youtube.channels.list({
-      auth: oauth2Client,
-      part: 'snippet,contentDetails,statistics',
-      mine: true
-    });
-    
-    if (!channelResponse.data.items || channelResponse.data.items.length === 0) {
-      return res.status(400).json({ message: 'No channel found for this account' });
-    }
-    
-    const channel = channelResponse.data.items[0];
     
     // Handle proxy association if provided
     let proxyId = null;
@@ -280,22 +268,24 @@ const addAccount = async (req, res, next) => {
       }
     }
     
-    // Create new account
+    // Create new account with what we know from ID token
     const newAccount = await YouTubeAccountModel.create({
       user: req.user.id,
       email,
       status: 'active',
-      channelId: channel.id,
-      channelTitle: channel.snippet.title,
-      thumbnailUrl: channel.snippet.thumbnails.default.url,
+      channelTitle: name || email,
+      thumbnailUrl: picture || '',
       proxy: proxyId,
       google: {
-        id: channel.id,
-        accessToken,
-        refreshToken,
+        id: googleId,
         tokenExpiry: new Date(Date.now() + 3600 * 1000) // 1 hour
       },
       connectedDate: new Date()
+    });
+    
+    // Add to user's YouTube accounts
+    await req.user.updateOne({
+      $push: { youtubeAccounts: newAccount._id }
     });
     
     res.status(201).json({
