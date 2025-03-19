@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -6,11 +7,16 @@ const mongoose = require('mongoose');
 const rateLimit = require('express-rate-limit');
 const passport = require('passport');
 
+// Import route handlers
 const authRoutes = require('./routes/auth.routes');
 const accountsRoutes = require('./routes/accounts.routes');
 const proxiesRoutes = require('./routes/proxies.routes');
 const commentsRoutes = require('./routes/comments.routes');
 const schedulerRoutes = require('./routes/scheduler.routes');
+
+// Import services
+const { setupScheduler } = require('./services/scheduler.service');
+const { setupPassport } = require('./config/passport.config');
 
 // Initialize express app
 const app = express();
@@ -21,11 +27,11 @@ mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 })
-  .then(() => console.log('Connected to MongoDB'))
-  .catch(err => {
-    console.error('MongoDB connection error:', err);
-    process.exit(1);
-  });
+.then(() => console.log('Connected to MongoDB'))
+.catch(err => {
+  console.error('MongoDB connection error:', err);
+  process.exit(1);
+});
 
 // Configure middleware
 app.use(helmet());
@@ -46,7 +52,8 @@ const apiLimiter = rateLimit({
 app.use('/api', apiLimiter);
 
 // Setup Passport.js for Google OAuth
-passport.initialize();
+setupPassport();
+app.use(passport.initialize());
 
 // Register routes
 app.use('/api/auth', authRoutes);
@@ -71,5 +78,12 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Export the app for Vercel's serverless function
+// Start the server
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  
+  // Initialize the comment scheduler
+  setupScheduler();
+});
+
 module.exports = app;
