@@ -35,20 +35,10 @@ mongoose.connect(process.env.MONGODB_URI, {
 
 // Configure middleware
 app.use(helmet());
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "https://youtubefront.vercel.app");
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.header("Access-Control-Allow-Credentials", "true");
-
-  // If it's a preflight request, stop here
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(200);
-  }
-
-  next();
-});
-
+app.use(cors({
+  origin: process.env.CLIENT_URL || 'http://localhost:4000',
+  credentials: true
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
