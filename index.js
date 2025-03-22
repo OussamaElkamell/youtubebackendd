@@ -36,7 +36,7 @@ mongoose.connect(process.env.MONGODB_URI, {
 // Configure middleware
 app.use(helmet());
 const corsOptions = {
-  origin: 'http://localhost:4000',
+  origin: process.env.CLIENT_URL || 'http://localhost:4000',
   credentials: true,
 };
 
