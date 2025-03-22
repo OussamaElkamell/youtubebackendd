@@ -3,7 +3,8 @@ const { ProxyModel } = require('../models/proxy.model');
 const { refreshTokenIfNeeded, getYouTubeClient } = require('../services/youtube.service');
 const { google } = require('googleapis');
 const { OAuth2Client } = require('google-auth-library');
-
+const { UserModel } = require('../models/user.model');
+const axios = require('axios');
 /**
  * Get all YouTube accounts for the authenticated user
  */
@@ -213,62 +214,69 @@ const verifyAccount = async (req, res, next) => {
 /**
  * Add a new YouTube account via OAuth
  */
+
+
+
+
+
 const addAccount = async (req, res, next) => {
   try {
-    const { credential, proxy } = req.body;
-    
-    if (!credential) {
-      return res.status(400).json({ message: 'Missing required credential' });
+    const { code, proxy } = req.body;
+
+    if (!code) {
+      return res.status(400).json({ message: 'Missing authorization code' });
     }
-    
-    // Verify the token with Google
+
+    console.log('Received authorization code:', code);
+
+    // Log the request payload for debugging
+    const requestPayload = {
+      code,
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      redirect_uri: process.env.GOOGLE_REDIRECT_URI,
+      grant_type: 'authorization_code',
+    };
+    console.log('Request payload:', requestPayload);
+
+    // Exchange the authorization code for access and refresh tokens
+    const tokenResponse = await axios.post('https://oauth2.googleapis.com/token', requestPayload);
+
+    const { access_token: accessToken, refresh_token: refreshToken, id_token: idToken } = tokenResponse.data;
+
+    // Verify the ID token to get user profile
     const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-    
-    // Verify the token and get user info
     const ticket = await client.verifyIdToken({
-      idToken: credential,
-      audience: process.env.GOOGLE_CLIENT_ID
+      idToken,
+      audience: process.env.GOOGLE_CLIENT_ID,
     });
-    
-    const payload = ticket.getPayload();
+
+    const payload = ticket.getPayload(); // Use a different variable name here
     if (!payload) {
-      return res.status(400).json({ message: 'Invalid credential' });
+      return res.status(400).json({ message: 'Invalid ID token' });
     }
-    
+
     const { email, sub: googleId, name, picture } = payload;
-    
-    // Check if account already exists for this user
-    const existingAccount = await YouTubeAccountModel.findOne({
-      user: req.user.id,
-      email
-    });
-    
+
+    // Handle existing account
+    let existingAccount = await YouTubeAccountModel.findOne({ user: req.user.id, email });
     if (existingAccount) {
-      // Update the existing account with new info
       existingAccount.status = 'active';
       existingAccount.google.id = googleId;
+      existingAccount.google.accessToken = accessToken;
+      existingAccount.google.refreshToken = refreshToken;
       await existingAccount.save();
-      
-      return res.json({
-        message: 'Account updated successfully',
-        account: existingAccount
-      });
+      return res.json({ message: 'Account updated successfully', account: existingAccount });
     }
-    
+
     // Handle proxy association if provided
     let proxyId = null;
     if (proxy) {
-      const proxyObj = await ProxyModel.findOne({
-        _id: proxy,
-        user: req.user.id
-      });
-      
-      if (proxyObj) {
-        proxyId = proxyObj._id;
-      }
+      const proxyObj = await ProxyModel.findOne({ _id: proxy, user: req.user.id });
+      if (proxyObj) proxyId = proxyObj._id;
     }
-    
-    // Create new account with what we know from ID token
+
+    // Create new account
     const newAccount = await YouTubeAccountModel.create({
       user: req.user.id,
       email,
@@ -278,27 +286,28 @@ const addAccount = async (req, res, next) => {
       proxy: proxyId,
       google: {
         id: googleId,
-        tokenExpiry: new Date(Date.now() + 3600 * 1000) // 1 hour
+        accessToken,
+        refreshToken,
       },
-      connectedDate: new Date()
+      connectedDate: new Date(),
     });
-    
-    // Add to user's YouTube accounts
-    await UserModel.updateOne(
-      { _id: req.user.id },
-      { $push: { youtubeAccounts: newAccount._id } }
-    );
-    
-    
-    res.status(201).json({
-      message: 'Account added successfully',
-      account: newAccount
-    });
+
+    await UserModel.updateOne({ _id: req.user.id }, { $push: { youtubeAccounts: newAccount._id } });
+
+    res.status(201).json({ message: 'Account added successfully', account: newAccount });
   } catch (error) {
     console.error('Error adding account:', error);
+    if (error.response) {
+      console.error('Response data:', error.response.data);
+      console.error('Response status:', error.response.status);
+      console.error('Response headers:', error.response.headers);
+    }
     next(error);
   }
 };
+
+
+
 
 module.exports = {
   getAllAccounts,

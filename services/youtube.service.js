@@ -10,53 +10,33 @@ const { createProxyAgent } = require('./proxy.service');
  * @param {Object} account YouTube account from the database
  * @param {Boolean} force Force token refresh even if not expired
  */
-async function refreshTokenIfNeeded(account, force = false) {
+async function refreshTokenIfNeeded(account) {
   try {
-    // Check if token needs refresh
-    if (!force && !account.needsTokenRefresh()) {
-      return { success: true, message: 'Token still valid' };
-    }
-    
     if (!account.google.refreshToken) {
-      return { 
-        success: false, 
-        error: 'No refresh token available. User needs to re-authenticate.' 
-      };
+      throw new Error('No refresh token available. User needs to re-authenticate.');
     }
-    
-    // Set up OAuth2 client
+
     const oauth2Client = new OAuth2Client(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
       process.env.GOOGLE_REDIRECT_URI
     );
-    
-    // Set refresh token
-    oauth2Client.setCredentials({
-      refresh_token: account.google.refreshToken
-    });
-    
-    // Get new access token
-    const response = await oauth2Client.refreshAccessToken();
-    const tokens = response.credentials;
-    
-    // Update account with new tokens
-    account.google.accessToken = tokens.access_token;
-    account.google.tokenExpiry = new Date(tokens.expiry_date);
+
+    oauth2Client.setCredentials({ refresh_token: account.google.refreshToken });
+
+    const { token } = await oauth2Client.getAccessToken();
+    if (!token) {
+      throw new Error('Failed to obtain new access token.');
+    }
+
+    account.google.accessToken = token;
     await account.save();
-    
-    return { success: true, message: 'Token refreshed successfully' };
+
+    console.log('✅ Access Token refreshed successfully:', token);
+    return oauth2Client;
   } catch (error) {
-    console.error('Error refreshing token:', error);
-    
-    // Mark account as inactive if refresh fails
-    account.status = 'inactive';
-    await account.save();
-    
-    return { 
-      success: false, 
-      error: error.message || 'Failed to refresh token' 
-    };
+    console.error('❌ Error refreshing token:', error);
+    throw new Error(error.message || 'Failed to refresh token');
   }
 }
 
