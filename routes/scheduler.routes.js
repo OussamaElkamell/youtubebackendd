@@ -263,20 +263,30 @@ router.put('/:id', authenticateJWT, async (req, res, next) => {
  */
 router.delete('/:id', authenticateJWT, async (req, res, next) => {
   try {
+    // Delete comments associated with the specified schedule
+    const scheduleId = req.params.id;
+
+    // Delete comments that belong to the specific schedule
+    await CommentModel.deleteMany({
+      scheduleId: scheduleId, // Assuming comments have a `scheduleId` field
+    });
+
+    // Now delete the schedule
     const result = await ScheduleModel.deleteOne({
-      _id: req.params.id,
+      _id: scheduleId,
       user: req.user.id
     });
-    
+
     if (result.deletedCount === 0) {
       return res.status(404).json({ message: 'Schedule not found' });
     }
-    
-    res.json({ message: 'Schedule deleted successfully' });
+
+    res.json({ message: 'Schedule and related comments deleted successfully' });
   } catch (error) {
     next(error);
   }
 });
+
 
 /**
  * @route POST /api/scheduler/:id/pause

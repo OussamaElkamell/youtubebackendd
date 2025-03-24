@@ -4,7 +4,7 @@ const { refreshTokenIfNeeded, getYouTubeClient } = require('../services/youtube.
 const { google } = require('googleapis');
 const { OAuth2Client } = require('google-auth-library');
 const { UserModel } = require('../models/user.model');
-const axios = require('axios');
+
 /**
  * Get all YouTube accounts for the authenticated user
  */
@@ -62,15 +62,31 @@ const updateAccount = async (req, res, next) => {
     
     // Update proxy if provided
     if (proxy) {
-      const proxyObj = await ProxyModel.findOne({
-        _id: proxy,
+      let proxyObj = await ProxyModel.findOne({
+        proxy: proxy,
         user: req.user.id
       });
       
+      // If proxy doesn't exist, create a new one
       if (!proxyObj) {
-        return res.status(404).json({ message: 'Proxy not found' });
+        const [host, port] = proxy.split(':'); // Assuming the proxy format is 'host:port'
+
+        // Ensure valid host and port
+        if (!host || !port) {
+          return res.status(400).json({ message: 'Invalid proxy format. Expected host:port.' });
+        }
+
+        // Create a new Proxy object
+        proxyObj = new ProxyModel({
+          proxy: proxy,
+          host: host,        // Set extracted host
+          port: parseInt(port, 10),  // Set extracted port (convert to number)
+          user: req.user.id
+        });
+        await proxyObj.save(); // Save the new proxy to the database
       }
       
+      // Assign the proxy ID to the account
       account.proxy = proxyObj._id;
     }
     
@@ -84,6 +100,7 @@ const updateAccount = async (req, res, next) => {
     next(error);
   }
 };
+
 
 /**
  * Delete a YouTube account
@@ -140,6 +157,56 @@ const refreshToken = async (req, res, next) => {
 /**
  * Verify account is working by making a test API call
  */
+
+
+const PROJECT_ID = process.env.GCP_PROJECT_ID; // Your Google Cloud Project ID
+const API_KEY = process.env.YOUTUBE_API_KEY; // YouTube API Key
+const axios = require('axios');
+
+let usedQuota = 0; // Track the number of requests made (manually)
+
+const getQuota = async (req, res) => {
+  try {
+    // Sample API request (this costs 1 unit)
+    const response = await axios.get("https://www.googleapis.com/youtube/v3/videos", {
+      params: {
+        part: "snippet",
+        chart: "mostPopular",
+        regionCode: "US",
+        maxResults: 5,
+        key: API_KEY
+      }
+    });
+
+    // Log the response data for debugging
+    console.log('API Response:', response.data);
+
+    // Increment the usedQuota as 1 request is made
+    usedQuota += 1;
+
+    // Calculate the remaining quota
+    const totalQuota = 10_000; // YouTube API default daily quota limit
+    const remainingQuota = totalQuota - usedQuota;
+
+    res.json({
+      quota: {
+        totalQuota: totalQuota,
+        usedQuota: usedQuota,
+        remainingQuota: remainingQuota
+      }
+    });
+
+  } catch (error) {
+    // Log the detailed error response for troubleshooting
+    console.error("Error fetching quota:", error.response?.data || error.message);
+    res.status(500).json({ message: "Failed to retrieve quota", error: error.response?.data || error.message });
+  }
+};
+
+
+
+
+
 const verifyAccount = async (req, res, next) => {
   try {
     const account = await YouTubeAccountModel.findOne({
@@ -214,69 +281,64 @@ const verifyAccount = async (req, res, next) => {
 /**
  * Add a new YouTube account via OAuth
  */
-
-
-
-
-
 const addAccount = async (req, res, next) => {
   try {
-    const { code, proxy } = req.body;
+    const { credential, proxy, access_token, refresh_token } = req.body;
+    console.log("req.body", req.body);
 
-    if (!code) {
-      return res.status(400).json({ message: 'Missing authorization code' });
+    if (!credential || !access_token || !refresh_token) {
+      return res.status(400).json({ message: 'Missing required credentials' });
     }
 
-    console.log('Received authorization code:', code);
-
-    // Log the request payload for debugging
-    const requestPayload = {
-      code,
-      client_id: process.env.GOOGLE_CLIENT_ID,
-      client_secret: process.env.GOOGLE_CLIENT_SECRET,
-      redirect_uri: process.env.GOOGLE_REDIRECT_URI,
-      grant_type: 'authorization_code',
-    };
-    console.log('Request payload:', requestPayload);
-
-    // Exchange the authorization code for access and refresh tokens
-    const tokenResponse = await axios.post('https://oauth2.googleapis.com/token', requestPayload);
-
-    const { access_token: accessToken, refresh_token: refreshToken, id_token: idToken } = tokenResponse.data;
-
-    // Verify the ID token to get user profile
+    // Verify the ID token with Google
     const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
     const ticket = await client.verifyIdToken({
-      idToken,
+      idToken: credential,
       audience: process.env.GOOGLE_CLIENT_ID,
     });
 
-    const payload = ticket.getPayload(); // Use a different variable name here
+    const payload = ticket.getPayload();
     if (!payload) {
-      return res.status(400).json({ message: 'Invalid ID token' });
+      return res.status(400).json({ message: 'Invalid credential' });
     }
 
     const { email, sub: googleId, name, picture } = payload;
 
-    // Handle existing account
-    let existingAccount = await YouTubeAccountModel.findOne({ user: req.user.id, email });
+    // Check if account already exists for this user
+    const existingAccount = await YouTubeAccountModel.findOne({
+      user: req.user.id,
+      email,
+    });
+
     if (existingAccount) {
+      // Update the existing account with new info
       existingAccount.status = 'active';
       existingAccount.google.id = googleId;
-      existingAccount.google.accessToken = accessToken;
-      existingAccount.google.refreshToken = refreshToken;
+      existingAccount.google.accessToken = access_token;
+      existingAccount.google.refreshToken = refresh_token;
       await existingAccount.save();
-      return res.json({ message: 'Account updated successfully', account: existingAccount });
+
+      return res.json({
+        message: 'Account updated successfully',
+        account: existingAccount,
+      });
     }
 
     // Handle proxy association if provided
     let proxyId = null;
     if (proxy) {
-      const proxyObj = await ProxyModel.findOne({ _id: proxy, user: req.user.id });
-      if (proxyObj) proxyId = proxyObj._id;
+      const proxyObj = await ProxyModel.findOne({
+        proxy: proxy,
+        user: req.user.id
+      });
+      
+
+      if (proxyObj) {
+        proxyId = proxyObj._id;
+      }
     }
 
-    // Create new account
+    // Create new account with the provided tokens
     const newAccount = await YouTubeAccountModel.create({
       user: req.user.id,
       email,
@@ -286,28 +348,28 @@ const addAccount = async (req, res, next) => {
       proxy: proxyId,
       google: {
         id: googleId,
-        accessToken,
-        refreshToken,
+        accessToken: access_token,
+        refreshToken: refresh_token,
+        tokenExpiry: new Date(Date.now() + 3600 * 1000), // Set initial expiry (1 hour)
       },
       connectedDate: new Date(),
     });
 
-    await UserModel.updateOne({ _id: req.user.id }, { $push: { youtubeAccounts: newAccount._id } });
+    // Add to user's YouTube accounts
+    await UserModel.updateOne(
+      { _id: req.user.id },
+      { $push: { youtubeAccounts: newAccount._id } }
+    );
 
-    res.status(201).json({ message: 'Account added successfully', account: newAccount });
+    res.status(201).json({
+      message: 'Account added successfully',
+      account: newAccount,
+    });
   } catch (error) {
     console.error('Error adding account:', error);
-    if (error.response) {
-      console.error('Response data:', error.response.data);
-      console.error('Response status:', error.response.status);
-      console.error('Response headers:', error.response.headers);
-    }
     next(error);
   }
 };
-
-
-
 
 module.exports = {
   getAllAccounts,
@@ -316,5 +378,6 @@ module.exports = {
   deleteAccount,
   refreshToken,
   verifyAccount,
-  addAccount
+  addAccount,
+  getQuota
 };

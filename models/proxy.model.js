@@ -2,6 +2,10 @@
 const mongoose = require('mongoose');
 
 const ProxySchema = new mongoose.Schema({
+  proxy: {
+    type: String, // Store proxy as a string instead of ObjectId
+    required: true
+  },
   user: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

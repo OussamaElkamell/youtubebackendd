@@ -46,85 +46,123 @@ async function refreshTokenIfNeeded(account) {
  */
 async function postComment(commentId) {
   try {
+    console.log("Starting postComment for commentId:", commentId);
+
     // Get comment from database
     const comment = await CommentModel.findById(commentId)
       .populate({
-        path: 'youtubeAccount',
-        populate: { path: 'proxy' }
+        path: "youtubeAccount",
+        populate: { path: "proxy" },
       });
-    
+
     if (!comment) {
-      throw new Error('Comment not found');
+      throw new Error("Comment not found");
     }
-    
+
+    console.log("Fetched comment from DB:", comment);
+
     const account = comment.youtubeAccount;
-    
+ 
+
     // Check account status
-    if (account.status !== 'active') {
+    if (account.status !== "active") {
+      console.warn(`YouTube account is not active: ${account.status}`);
       throw new Error(`YouTube account is ${account.status}`);
     }
-    
+
     // Refresh token if needed
-    const refreshResult = await refreshTokenIfNeeded(account);
-    if (!refreshResult.success) {
-      throw new Error(refreshResult.error);
+
+    const oauth2Client = await refreshTokenIfNeeded(account);
+    const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+   
+
+    
+
+    // Set up YouTube API client with proxy if available
+    console.log("Initializing YouTube API client...");
+  
+    console.log("YouTube API client initialized.");
+  
+    if (!comment.content || comment.content.trim() === '') {
+      throw new Error("Comment content is empty");
+    }
+    const sanitizedContent = comment.content.trim();
+    if (!sanitizedContent) {
+      throw new Error("Comment content is empty after trimming");
     }
     
-    // Set up YouTube API client with proxy if available
-    const youtube = await getYouTubeClient(account);
-    
-    // Prepare comment data
     const commentData = {
       snippet: {
         videoId: comment.videoId,
-        textOriginal: comment.content
-      }
+        topLevelComment: {
+          snippet: {
+            textOriginal: sanitizedContent,
+          },
+        },
+      },
     };
     
-    // Add parent ID for replies
+    console.log("CommentData",commentData);
+    
+    // Add parent ID for replies if available
     if (comment.parentId) {
       commentData.snippet.parentId = comment.parentId;
+      console.log("Posting a reply to parentId:", comment.parentId);
+    } else {
+      console.log("Posting a top-level comment to videoId:", comment.videoId);
     }
     
     // Post the comment
+    console.log("Sending request to YouTube API...");
     const response = await youtube.commentThreads.insert({
-      part: 'snippet',
-      requestBody: commentData
+      part: "snippet",
+      requestBody: commentData,
+      Comments:comment.content
     });
-    
+    console.log("YouTube API response:", response.data);
+
     // Update comment with ID from YouTube
     const commentThread = response.data;
     const youtubeCommentId = commentThread.id;
-    
+
+    console.log("Comment posted successfully. YouTube Comment ID:", youtubeCommentId);
+
     // Update daily usage counter
-    await updateDailyUsage(account._id, 'commentCount');
-    
-    return { 
-      success: true, 
+    console.log("Updating daily usage count for account:", account._id);
+    await updateDailyUsage(account._id, "commentCount");
+    console.log("Daily usage count updated.");
+
+    return {
+      success: true,
       commentId: youtubeCommentId,
-      message: 'Comment posted successfully' 
+      message: "Comment posted successfully",
     };
   } catch (error) {
-    console.error('Error posting comment:', error);
-    
+    console.error("Error posting comment:", error);
+
     // Check for quota exceeded error
-    if (error.message.includes('quotaExceeded') || 
-        error.message.includes('dailyLimitExceeded')) {
+    if (
+      error.message.includes("quotaExceeded") ||
+      error.message.includes("dailyLimitExceeded")
+    ) {
+      console.warn("Quota exceeded or daily limit reached. Updating account status...");
       try {
         const account = comment.youtubeAccount;
-        account.status = 'limited';
+        account.status = "limited";
         await account.save();
+        console.log("Account status updated to 'limited'.");
       } catch (updateError) {
-        console.error('Error updating account status:', updateError);
+        console.error("Error updating account status:", updateError);
       }
     }
-    
-    return { 
-      success: false, 
-      error: error.message || 'Failed to post comment' 
+
+    return {
+      success: false,
+      error: error.message || "Failed to post comment",
     };
   }
 }
+
 
 /**
  * Update daily usage counter for a YouTube account

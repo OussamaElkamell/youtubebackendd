@@ -280,6 +280,7 @@ async function processSchedule(scheduleId) {
           setTimeout(async () => {
             try {
               const result = await postComment(comment._id);
+              console.log("resullllt",result);
               
               // Update comment status
               if (result.success) {

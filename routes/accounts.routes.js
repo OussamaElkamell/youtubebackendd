@@ -26,6 +26,8 @@ router.get('/:id', authenticateJWT, accountsController.getAccountById);
  */
 router.post('/', authenticateJWT, accountsController.addAccount);
 
+
+
 /**
  * @route PUT /api/accounts/:id
  * @desc Update a YouTube account
@@ -53,5 +55,10 @@ router.post('/:id/refresh-token', authenticateJWT, accountsController.refreshTok
  * @access Private
  */
 router.post('/:id/verify', authenticateJWT, accountsController.verifyAccount);
-
+/**
+ * @route GET /api/accounts/quota
+ * @desc Get quota usage for YouTube accounts
+ * @access Private
+ */
+router.get('/quota/quota', authenticateJWT, accountsController.getQuota);
 module.exports = router;
