@@ -198,7 +198,7 @@ const getQuota = async (req, res) => {
 
       // Increment the used quota as 1 request is made
       let usedQuota = activeProfile.usedQuota || 0;
-      usedQuota += 1;  // Assuming each API request consumes 1 unit of quota
+      usedQuota += 50;  // Assuming each API request consumes 1 unit of quota
 
       // Calculate remaining quota (assuming a fixed quota limit)
       const totalQuota = 10_000; // YouTube API default daily quota limit
