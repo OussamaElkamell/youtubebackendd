@@ -5,6 +5,21 @@ const { YouTubeAccountModel } = require('../models/youtube-account.model');
 const { CommentModel } = require('../models/comment.model');
 const { createProxyAgent } = require('./proxy.service');
 
+const ApiProfile = require('../models/ApiProfile');
+
+async function getActiveProfile() {
+  try {
+    const profile = await ApiProfile.findOne({ isActive: true });
+    if (!profile) {
+      throw new Error('No active profile found');
+    }
+    return profile;
+  } catch (err) {
+    throw new Error(`Failed to get active profile: ${err.message}`);
+  }
+}
+
+
 /**
  * Refresh an OAuth2 token if needed
  * @param {Object} account YouTube account from the database
@@ -15,11 +30,11 @@ async function refreshTokenIfNeeded(account) {
     if (!account.google.refreshToken) {
       throw new Error('No refresh token available. User needs to re-authenticate.');
     }
-
+    const activeProfile = await getActiveProfile();
     const oauth2Client = new OAuth2Client(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
-      process.env.GOOGLE_REDIRECT_URI
+      activeProfile.clientId, // Use from active profile
+      activeProfile.clientSecret, // Use from active profile
+      activeProfile.redirectUri // Use from active profile
     );
 
     oauth2Client.setCredentials({ refresh_token: account.google.refreshToken });
@@ -32,10 +47,9 @@ async function refreshTokenIfNeeded(account) {
     account.google.accessToken = token;
     await account.save();
 
-    console.log('✅ Access Token refreshed successfully:', token);
+ 
     return oauth2Client;
   } catch (error) {
-    console.error('❌ Error refreshing token:', error);
     throw new Error(error.message || 'Failed to refresh token');
   }
 }
@@ -46,7 +60,7 @@ async function refreshTokenIfNeeded(account) {
  */
 async function postComment(commentId) {
   try {
-    console.log("Starting postComment for commentId:", commentId);
+ 
 
     // Get comment from database
     const comment = await CommentModel.findById(commentId)
@@ -59,7 +73,6 @@ async function postComment(commentId) {
       throw new Error("Comment not found");
     }
 
-    console.log("Fetched comment from DB:", comment);
 
     const account = comment.youtubeAccount;
  
@@ -76,12 +89,6 @@ async function postComment(commentId) {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
    
 
-    
-
-    // Set up YouTube API client with proxy if available
-    console.log("Initializing YouTube API client...");
-  
-    console.log("YouTube API client initialized.");
   
     if (!comment.content || comment.content.trim() === '') {
       throw new Error("Comment content is empty");
@@ -101,8 +108,7 @@ async function postComment(commentId) {
         },
       },
     };
-    
-    console.log("CommentData",commentData);
+
     
     // Add parent ID for replies if available
     if (comment.parentId) {
@@ -112,25 +118,22 @@ async function postComment(commentId) {
       console.log("Posting a top-level comment to videoId:", comment.videoId);
     }
     
-    // Post the comment
-    console.log("Sending request to YouTube API...");
+
     const response = await youtube.commentThreads.insert({
       part: "snippet",
       requestBody: commentData,
       Comments:comment.content
     });
-    console.log("YouTube API response:", response.data);
+
 
     // Update comment with ID from YouTube
     const commentThread = response.data;
     const youtubeCommentId = commentThread.id;
 
-    console.log("Comment posted successfully. YouTube Comment ID:", youtubeCommentId);
 
-    // Update daily usage counter
-    console.log("Updating daily usage count for account:", account._id);
+
     await updateDailyUsage(account._id, "commentCount");
-    console.log("Daily usage count updated.");
+
 
     return {
       success: true,
@@ -213,10 +216,11 @@ async function updateDailyUsage(accountId, type) {
  */
 async function getYouTubeClient(account) {
   // Set up OAuth2 client
+  const activeProfile = await getActiveProfile();
   const oauth2Client = new OAuth2Client(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI
+    activeProfile.clientId,
+    activeProfile.clientSecret,
+    activeProfile.redirectUri
   );
   
   // Set credentials

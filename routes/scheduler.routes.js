@@ -139,8 +139,10 @@ router.post('/', authenticateJWT, async (req, res, next) => {
         maxDelay: 180,
         betweenAccounts: 300
       },
-      status: 'active'
+      status: 'active',
+      interval: scheduleConfig.interval || { value: 1, unit: 'minutes' } // Default interval if not provided
     });
+    
     
     await schedule.save();
     

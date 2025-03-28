@@ -351,6 +351,7 @@ function setupImmediateCommentsProcessor() {
         status: 'pending',
         scheduledFor: null
       }).limit(10);
+      console.log("pending comments",pendingComments);
       
       // Process each comment
       for (const comment of pendingComments) {

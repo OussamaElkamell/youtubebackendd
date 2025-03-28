@@ -4,6 +4,20 @@ const { refreshTokenIfNeeded, getYouTubeClient } = require('../services/youtube.
 const { google } = require('googleapis');
 const { OAuth2Client } = require('google-auth-library');
 const { UserModel } = require('../models/user.model');
+const ApiProfile = require('../models/ApiProfile');
+const axios = require('axios');
+
+async function getActiveProfile() {
+  try {
+    const profile = await ApiProfile.findOne({ isActive: true });
+    if (!profile) {
+      throw new Error('No active profile found');
+    }
+    return profile;
+  } catch (err) {
+    throw new Error(`Failed to get active profile: ${err.message}`);
+  }
+}
 
 /**
  * Get all YouTube accounts for the authenticated user
@@ -159,49 +173,93 @@ const refreshToken = async (req, res, next) => {
  */
 
 
-const PROJECT_ID = process.env.GCP_PROJECT_ID; // Your Google Cloud Project ID
-const API_KEY = process.env.YOUTUBE_API_KEY; // YouTube API Key
-const axios = require('axios');
 
-let usedQuota = 0; // Track the number of requests made (manually)
+
 
 const getQuota = async (req, res) => {
   try {
-    // Sample API request (this costs 1 unit)
-    const response = await axios.get("https://www.googleapis.com/youtube/v3/videos", {
-      params: {
-        part: "snippet",
-        chart: "mostPopular",
-        regionCode: "US",
-        maxResults: 5,
-        key: API_KEY
+    // Get the active profile
+    const activeProfile = await getActiveProfile();
+    if (!activeProfile) {
+      return res.status(404).json({ message: 'No active profile found' });
+    }
+
+    try {
+      // Sample API request to YouTube (using active profile API key)
+      const response = await axios.get("https://www.googleapis.com/youtube/v3/videos", {
+        params: {
+          part: "snippet",
+          chart: "mostPopular",
+          regionCode: "US",
+          maxResults: 5,
+          key: activeProfile.apiKey,
+        }
+      });
+
+      // Increment the used quota as 1 request is made
+      let usedQuota = activeProfile.usedQuota || 0;
+      usedQuota += 1;  // Assuming each API request consumes 1 unit of quota
+
+      // Calculate remaining quota (assuming a fixed quota limit)
+      const totalQuota = 10_000; // YouTube API default daily quota limit
+      const remainingQuota = totalQuota - usedQuota;
+
+      // Update the active profile's quota information
+      await ApiProfile.findByIdAndUpdate(
+        activeProfile._id,
+        { $set: { usedQuota: usedQuota } },
+        { new: true }
+      );
+
+      // Return the remaining quota if everything is within limits
+      return res.json({
+        quota: {
+          totalQuota,
+          usedQuota,
+          remainingQuota,
+        },
+      });
+
+    } catch (error) {
+      // Check if the error is a quota exceeded error (403)
+      if (error.response?.status === 403 && error.response?.data?.error?.message.includes("exceeded your quota")) {
+        console.log("Quota exceeded, switching to another profile...");
+
+        // Deactivate current profile and switch to the next one
+        await ApiProfile.updateMany({}, { $set: { isActive: false } });
+        
+        // Find and activate the next available profile (does not check quota)
+        const nextProfile = await ApiProfile.findOneAndUpdate(
+          { isActive: false }, // Find the next inactive profile
+          { $set: { isActive: true } },
+          { new: true }
+        );
+
+        if (nextProfile) {
+          console.log("Switched to profile:", nextProfile._id);
+          return res.json({
+            quota: {
+              totalQuota: 10_000,
+              usedQuota: nextProfile.usedQuota || 0,
+              remainingQuota: 10_000 - (nextProfile.usedQuota || 0),
+            },
+            message: 'Switched to another profile due to quota exhaustion',
+          });
+        } else {
+          return res.status(500).json({ message: 'No available profiles to switch to' });
+        }
       }
-    });
 
-    // Log the response data for debugging
-    console.log('API Response:', response.data);
-
-    // Increment the usedQuota as 1 request is made
-    usedQuota += 1;
-
-    // Calculate the remaining quota
-    const totalQuota = 10_000; // YouTube API default daily quota limit
-    const remainingQuota = totalQuota - usedQuota;
-
-    res.json({
-      quota: {
-        totalQuota: totalQuota,
-        usedQuota: usedQuota,
-        remainingQuota: remainingQuota
-      }
-    });
-
+      // For other errors, return the error message
+      console.error("Error fetching quota:", error.response?.data || error.message);
+      return res.status(500).json({ message: "Failed to retrieve quota", error: error.response?.data || error.message });
+    }
   } catch (error) {
-    // Log the detailed error response for troubleshooting
     console.error("Error fetching quota:", error.response?.data || error.message);
-    res.status(500).json({ message: "Failed to retrieve quota", error: error.response?.data || error.message });
+    return res.status(500).json({ message: "Failed to retrieve quota", error: error.response?.data || error.message });
   }
 };
+
 
 
 
