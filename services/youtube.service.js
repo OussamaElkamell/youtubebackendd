@@ -26,32 +26,80 @@ async function getActiveProfile() {
  * @param {Boolean} force Force token refresh even if not expired
  */
 async function refreshTokenIfNeeded(account) {
-  try {
-    if (!account.google.refreshToken) {
-      throw new Error('No refresh token available. User needs to re-authenticate.');
-    }
-    const activeProfile = await getActiveProfile();
+  // Helper function to try with a specific profile
+  const tryWithProfile = async (profile) => {
     const oauth2Client = new OAuth2Client(
-      activeProfile.clientId, // Use from active profile
-      activeProfile.clientSecret, // Use from active profile
-      activeProfile.redirectUri // Use from active profile
+      profile.clientId,
+      profile.clientSecret,
+      profile.redirectUri
     );
 
-    oauth2Client.setCredentials({ refresh_token: account.google.refreshToken });
+    oauth2Client.setCredentials({ 
+      refresh_token: account.google.refreshToken 
+    });
 
     const { token } = await oauth2Client.getAccessToken();
     if (!token) {
-      throw new Error('Failed to obtain new access token.');
+      throw new Error('Failed to obtain access token');
     }
 
-    account.google.accessToken = token;
+    // Update account with new token and profile info
+    account.google = {
+      ...account.google,
+      accessToken: token,
+      clientId: profile.clientId,
+      clientSecret: profile.clientSecret,
+      redirectUri: profile.redirectUri
+    };
     await account.save();
 
- 
     return oauth2Client;
+  };
+
+  try {
+    if (!account.google?.refreshToken) {
+      throw new Error('No refresh token available. User needs to re-authenticate.');
+    }
+
+    // First try with active profile
+    try {
+      const activeProfile = await ApiProfile.findOne({ isActive: true });
+      if (!activeProfile) {
+        throw new Error('No active profile found');
+      }
+      return await tryWithProfile(activeProfile);
+    } catch (activeProfileError) {
+      console.warn('Active profile failed, trying others...', activeProfileError.message);
+      
+      // If active profile fails, try all profiles in order
+      const allProfiles = await ApiProfile.find().sort({ createdAt: -1 });
+      if (allProfiles.length === 0) {
+        throw new Error('No API profiles available');
+      }
+
+      for (const profile of allProfiles) {
+        try {
+          return await tryWithProfile(profile);
+        } catch (profileError) {
+          console.warn(`Failed with profile ${profile._id}:`, profileError.message);
+          continue;
+        }
+      }
+
+      throw new Error('All profile attempts failed');
+    }
   } catch (error) {
+    console.error('Token refresh failed:', error);
     throw new Error(error.message || 'Failed to refresh token');
   }
+}
+function addRandomEmojis(text) {
+  const emojis = ['🎉', '🔥', '🚀', '💯', '✨', '😎', '👍', '🤩', '🥳'];
+  const randomEmojis = Array.from({ length: 3 }, () => 
+    emojis[Math.floor(Math.random() * emojis.length)]
+  ).join('');
+
+  return `${text} ${randomEmojis}`;
 }
 
 /**
@@ -60,8 +108,15 @@ async function refreshTokenIfNeeded(account) {
  */
 async function postComment(commentId) {
   try {
- 
+    const allProfiles = await ApiProfile.find().sort({ isActive: -1, createdAt: -1 });
+    if (allProfiles.length === 0) {
+      console.warn('No API profiles available');
+      return;
+    }
 
+
+ 
+    
     // Get comment from database
     const comment = await CommentModel.findById(commentId)
       .populate({
@@ -89,11 +144,12 @@ async function postComment(commentId) {
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
    
 
-  
+
     if (!comment.content || comment.content.trim() === '') {
       throw new Error("Comment content is empty");
     }
-    const sanitizedContent = comment.content.trim();
+    let sanitizedContent = comment.content.trim();
+    sanitizedContent = addRandomEmojis(sanitizedContent);
     if (!sanitizedContent) {
       throw new Error("Comment content is empty after trimming");
     }
@@ -122,7 +178,7 @@ async function postComment(commentId) {
     const response = await youtube.commentThreads.insert({
       part: "snippet",
       requestBody: commentData,
-      Comments:comment.content
+      Comments:  sanitizedContent
     });
 
 
@@ -134,6 +190,17 @@ async function postComment(commentId) {
 
     await updateDailyUsage(account._id, "commentCount");
 
+    let activeProfile = allProfiles.find(p => p.isActive) || allProfiles[0];
+
+    const updatedProfile = await ApiProfile.findByIdAndUpdate(
+      activeProfile._id,
+      {
+        $inc: { usedQuota: 50 }, // Increment usedQuota by 50
+
+      },
+      { new: true, upsert: true } // Create the document if it doesn't exist
+    );
+    
 
     return {
       success: true,

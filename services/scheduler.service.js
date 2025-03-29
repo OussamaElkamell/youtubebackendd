@@ -5,7 +5,7 @@ const { CommentModel } = require('../models/comment.model');
 const { YouTubeAccountModel } = require('../models/youtube-account.model');
 const { postComment } = require('./youtube.service');
 const { assignRandomProxy } = require('./proxy.service');
-
+const ApiProfile = require('../models/ApiProfile');
 // Store active cron jobs
 const activeJobs = new Map();
 
@@ -142,7 +142,7 @@ async function setupScheduleJob(scheduleId) {
 async function processSchedule(scheduleId) {
   try {
     console.log(`Processing schedule ${scheduleId}`);
-    
+
     // Get schedule with accounts
     const schedule = await ScheduleModel.findById(scheduleId)
       .populate('selectedAccounts');
@@ -280,8 +280,7 @@ async function processSchedule(scheduleId) {
           setTimeout(async () => {
             try {
               const result = await postComment(comment._id);
-              console.log("resullllt",result);
-              
+           
               // Update comment status
               if (result.success) {
                 comment.status = 'posted';
@@ -342,32 +341,77 @@ async function processSchedule(scheduleId) {
 /**
  * Set up processor for immediate comments
  */
-function setupImmediateCommentsProcessor() {
+async function setupImmediateCommentsProcessor() {
   // Run every minute
   const job = cron.schedule('* * * * *', async () => {
     try {
-      // Find pending comments scheduled for immediate posting
-      const pendingComments = await CommentModel.find({
-        status: 'pending',
-        scheduledFor: null
-      }).limit(10);
-      console.log("pending comments",pendingComments);
-      
-      // Process each comment
+      // 1. Get all available profiles sorted by preference
+      const allProfiles = await ApiProfile.find().sort({ isActive: -1, createdAt: -1 });
+      if (allProfiles.length === 0) {
+        console.warn('No API profiles available');
+        return;
+      }
+
+      // 2. Track if we need to switch profiles
+      let shouldSwitchProfile = false;
+      let activeProfile = allProfiles.find(p => p.isActive) || allProfiles[0];
+
+      const pendingComments = await CommentModel.find({ 
+        status: "pending",
+        youtubeAccount: { $ne: null }
+      })
+      .where('youtubeAccount.google.profileId').equals(activeProfile._id) // Direct filter
+      .limit(10);
+
+      console.log("Filtered Pending Comments: ", pendingComments);
+
+      if (pendingComments.length === 0) {
+        console.log('No pending comments for current profile');
+        return;
+      }
+
+      // 4. Process each comment
+      let successCount = 0;
       for (const comment of pendingComments) {
         try {
           await postComment(comment._id);
+          successCount++;
+
         } catch (error) {
-          console.error(`Error posting immediate comment ${comment._id}:`, error);
+          console.error(`Failed to post comment ${comment._id}:`, error.message);
+          await CommentModel.updateOne(
+            { _id: comment._id },
+            { $set: { status: 'failed', error: error.message } }
+          );
+          shouldSwitchProfile = true;
         }
       }
+
+      // 5. Handle profile switching if needed
+      if (shouldSwitchProfile && successCount === 0) {
+        const currentIndex = allProfiles.findIndex(p => p._id.equals(activeProfile._id));
+        const nextIndex = (currentIndex + 1) % allProfiles.length;
+        const nextProfile = allProfiles[nextIndex];
+
+        console.log(`Switching from profile ${activeProfile._id} to ${nextProfile._id}`);
+
+        // Update active profile in database
+        await ApiProfile.updateMany({}, { $set: { isActive: false } });
+        await ApiProfile.findByIdAndUpdate(nextProfile._id, { $set: { isActive: true } });
+
+        console.log(`Now using profile ${nextProfile._id} as active`);
+      }
+
+      console.log(`Posted ${successCount}/${pendingComments.length} comments`);
+
     } catch (error) {
-      console.error('Error processing immediate comments:', error);
+      console.error('Error in comment processor:', error);
     }
   });
-  
+
   activeJobs.set('immediate-processor', job);
 }
+
 
 /**
  * Set up daily maintenance job

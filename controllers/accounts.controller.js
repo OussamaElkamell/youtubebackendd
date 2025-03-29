@@ -24,10 +24,24 @@ async function getActiveProfile() {
  */
 const getAllAccounts = async (req, res, next) => {
   try {
-    const accounts = await YouTubeAccountModel.find({ user: req.user.id })
-      .populate('proxy', 'host port protocol status');
-    
-    res.json({ accounts });
+    // First get the active profile
+    const activeProfile = await ApiProfile.findOne({ isActive: true });
+    if (!activeProfile) {
+      return res.status(400).json({ message: 'No active API profile configured' });
+    }
+
+    // Filter accounts by the active profile ID
+    const accounts = await YouTubeAccountModel.find({ 
+      user: req.user.id,
+      'google.profileId': activeProfile._id 
+    })
+    .populate('proxy', 'host port protocol status')
+    .populate('google.profileId', 'name clientId'); // Optionally populate profile info
+
+    res.json({ 
+      accounts,
+      activeProfileId: activeProfile._id // Return active profile ID for reference
+    });
   } catch (error) {
     next(error);
   }
@@ -196,11 +210,11 @@ const getQuota = async (req, res) => {
         }
       });
 
-      // Increment the used quota as 1 request is made
+      // Retrieve the usedQuota from the database and update it
       let usedQuota = activeProfile.usedQuota || 0;
-      usedQuota += 50;  // Assuming each API request consumes 1 unit of quota
+    
 
-      // Calculate remaining quota (assuming a fixed quota limit)
+      // Calculate remaining quota
       const totalQuota = 10_000; // YouTube API default daily quota limit
       const remainingQuota = totalQuota - usedQuota;
 
@@ -222,33 +236,7 @@ const getQuota = async (req, res) => {
 
     } catch (error) {
       // Check if the error is a quota exceeded error (403)
-      if (error.response?.status === 403 && error.response?.data?.error?.message.includes("exceeded your quota")) {
-        console.log("Quota exceeded, switching to another profile...");
-
-        // Deactivate current profile and switch to the next one
-        await ApiProfile.updateMany({}, { $set: { isActive: false } });
-        
-        // Find and activate the next available profile (does not check quota)
-        const nextProfile = await ApiProfile.findOneAndUpdate(
-          { isActive: false }, // Find the next inactive profile
-          { $set: { isActive: true } },
-          { new: true }
-        );
-
-        if (nextProfile) {
-          console.log("Switched to profile:", nextProfile._id);
-          return res.json({
-            quota: {
-              totalQuota: 10_000,
-              usedQuota: nextProfile.usedQuota || 0,
-              remainingQuota: 10_000 - (nextProfile.usedQuota || 0),
-            },
-            message: 'Switched to another profile due to quota exhaustion',
-          });
-        } else {
-          return res.status(500).json({ message: 'No available profiles to switch to' });
-        }
-      }
+      
 
       // For other errors, return the error message
       console.error("Error fetching quota:", error.response?.data || error.message);
@@ -259,6 +247,7 @@ const getQuota = async (req, res) => {
     return res.status(500).json({ message: "Failed to retrieve quota", error: error.response?.data || error.message });
   }
 };
+
 
 
 
@@ -348,11 +337,23 @@ const addAccount = async (req, res, next) => {
       return res.status(400).json({ message: 'Missing required credentials' });
     }
 
-    // Verify the ID token with Google
-    const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+    // Get active profile first
+    const activeProfile = await ApiProfile.findOne({ isActive: true });
+    if (!activeProfile) {
+      return res.status(400).json({ message: 'No active API profile configured' });
+    }
+    console.log("Active Profile Id",activeProfile._id);
+    
+    // Verify the ID token with Google using active profile's credentials
+    const client = new OAuth2Client(
+      activeProfile.clientId,
+      activeProfile.clientSecret,
+      activeProfile.redirectUri
+    );
+
     const ticket = await client.verifyIdToken({
       idToken: credential,
-      audience: process.env.GOOGLE_CLIENT_ID,
+      audience: activeProfile.clientId, // Use profile's client ID as audience
     });
 
     const payload = ticket.getPayload();
@@ -369,11 +370,17 @@ const addAccount = async (req, res, next) => {
     });
 
     if (existingAccount) {
-      // Update the existing account with new info
+      // Update the existing account with new info and active profile credentials
       existingAccount.status = 'active';
-      existingAccount.google.id = googleId;
-      existingAccount.google.accessToken = access_token;
-      existingAccount.google.refreshToken = refresh_token;
+      existingAccount.google = {
+        id: googleId,
+        accessToken: access_token,
+        refreshToken: refresh_token,
+        tokenExpiry: new Date(Date.now() + 3600 * 1000), // 1 hour expiry
+        clientId: activeProfile.clientId,
+        clientSecret: activeProfile.clientSecret,
+        redirectUri: activeProfile.redirectUri
+      };
       await existingAccount.save();
 
       return res.json({
@@ -390,13 +397,12 @@ const addAccount = async (req, res, next) => {
         user: req.user.id
       });
       
-
       if (proxyObj) {
         proxyId = proxyObj._id;
       }
     }
 
-    // Create new account with the provided tokens
+    // Create new account with the provided tokens and active profile credentials
     const newAccount = await YouTubeAccountModel.create({
       user: req.user.id,
       email,
@@ -408,10 +414,15 @@ const addAccount = async (req, res, next) => {
         id: googleId,
         accessToken: access_token,
         refreshToken: refresh_token,
-        tokenExpiry: new Date(Date.now() + 3600 * 1000), // Set initial expiry (1 hour)
+        tokenExpiry: new Date(Date.now() + 3600 * 1000), // 1 hour expiry
+        clientId: activeProfile.clientId,
+        clientSecret: activeProfile.clientSecret,
+        redirectUri: activeProfile.redirectUri,
+        profileId: activeProfile._id,  // Ensure this is being passed correctly
       },
       connectedDate: new Date(),
     });
+    
 
     // Add to user's YouTube accounts
     await UserModel.updateOne(
@@ -422,6 +433,7 @@ const addAccount = async (req, res, next) => {
     res.status(201).json({
       message: 'Account added successfully',
       account: newAccount,
+      profileId: activeProfile._id // Return the profile ID used
     });
   } catch (error) {
     console.error('Error adding account:', error);

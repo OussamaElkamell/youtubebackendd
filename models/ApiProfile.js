@@ -1,6 +1,4 @@
-
 const mongoose = require('mongoose');
-const bcrypt = require('bcrypt');
 
 const ApiProfileSchema = new mongoose.Schema({
   name: {
@@ -32,6 +30,10 @@ const ApiProfileSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  usedQuota: {
+    type: Number,
+    default: 0 // Tracks the API quota usage
+  },
   createdAt: {
     type: Date,
     default: Date.now
@@ -42,16 +44,11 @@ const ApiProfileSchema = new mongoose.Schema({
   }
 });
 
-// Update the updatedAt field before saving
+// Update the `updatedAt` field before saving
 ApiProfileSchema.pre('save', function(next) {
   this.updatedAt = Date.now();
   next();
 });
 
-// Encrypt sensitive fields before saving
-ApiProfileSchema.pre('save', async function(next) {
-  if (!this.isModified('clientSecret')) return next();
-  
-});
 const ApiProfile = mongoose.model('ApiProfile', ApiProfileSchema);
 module.exports = ApiProfile;
