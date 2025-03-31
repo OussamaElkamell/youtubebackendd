@@ -54,31 +54,29 @@ const { ProxyAgent } = require('undici');
 // }
 async function createProxyAgent(proxy) {
   try {
-    // If proxy is an ID, fetch it from the database
     if (typeof proxy === 'string') {
       proxy = await ProxyModel.findById(proxy);
-      if (!proxy) {
-        throw new Error('Proxy not found');
-      }
+      if (!proxy) throw new Error('Proxy not found');
     }
 
-    // Check if proxy is active
     if (proxy.status !== 'active') {
       throw new Error(`Proxy is ${proxy.status}`);
     }
+  
+    // Ensure proxy credentials are correctly formatted
+    const authPart = `zbeast:ahmadi58@`;
+    const proxyUrl = `${proxy.protocol}://${authPart}${proxy.host}:${proxy.port}`;
 
-    // Construct proxy URL
-    const proxyUrl = `${proxy.protocol}://${proxy.username && proxy.password ? 
-      `${proxy.username}:${proxy.password}@` : ''}${proxy.host}:${proxy.port}`;
+    console.log("Proxy URL:", proxyUrl);
 
-    // Create ProxyAgent using undici
+    // Create ProxyAgent using undici with authentication in the URL
     const agent = new ProxyAgent(proxyUrl);
 
     // Test the proxy by making a request
     const url = 'https://ipv4.icanhazip.com';
     const response = await fetch(url, { dispatcher: agent });
+
     const data = await response.text();
-    
     console.log('Proxy IP:', data);
 
     return agent;

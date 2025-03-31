@@ -29,6 +29,7 @@
     "passport-google-oauth20": "^2.0.0",
     "puppeteer": "^22.8.2",
     "socks-proxy-agent": "^8.0.1",
+    "undici": "^6.21.2",
     "uuid": "^9.0.1",
     "winston": "^3.11.0"
   },
