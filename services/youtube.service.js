@@ -4,6 +4,8 @@ const { OAuth2Client } = require('google-auth-library');
 const { YouTubeAccountModel } = require('../models/youtube-account.model');
 const { CommentModel } = require('../models/comment.model');
 const { createProxyAgent } = require('./proxy.service');
+const axios = require('axios');
+
 
 const ApiProfile = require('../models/ApiProfile');
 
@@ -25,35 +27,46 @@ async function getActiveProfile() {
  * @param {Object} account YouTube account from the database
  * @param {Boolean} force Force token refresh even if not expired
  */
+
+
+
 async function refreshTokenIfNeeded(account) {
-  // Helper function to try with a specific profile
-  const tryWithProfile = async (profile) => {
+  const tryWithGoogleCredentials = async (googleCredentials) => {
     const oauth2Client = new OAuth2Client(
-      profile.clientId,
-      profile.clientSecret,
-      profile.redirectUri
+      googleCredentials.clientId,
+      googleCredentials.clientSecret,
+      googleCredentials.redirectUri
     );
 
-    oauth2Client.setCredentials({ 
-      refresh_token: account.google.refreshToken 
+    oauth2Client.setCredentials({
+      refresh_token: googleCredentials.refreshToken
     });
 
-    const { token } = await oauth2Client.getAccessToken();
-    if (!token) {
-      throw new Error('Failed to obtain access token');
+    try {
+      const { credentials } = await oauth2Client.refreshAccessToken();
+      if (!credentials.access_token) {
+        throw new Error('Failed to obtain access token');
+      }
+
+      // Ensure we have a valid expiry time
+      const expiresInMillis = (credentials.expiry_date || 
+                              (credentials.expires_in ? (credentials.expires_in * 1000) : 3600 * 1000));
+      const tokenExpiry = new Date(Date.now() + expiresInMillis);
+
+      if (isNaN(tokenExpiry.getTime())) {
+        throw new Error('Invalid token expiry date calculation');
+      }
+
+      // Update account with new access token and expiry time
+      account.google.accessToken = credentials.access_token;
+      account.google.tokenExpiry = tokenExpiry;
+      await account.save();
+
+      return oauth2Client;
+    } catch (error) {
+      console.error(`Token refresh failed for account ${account._id}:`, error);
+      throw error;
     }
-
-    // Update account with new token and profile info
-    account.google = {
-      ...account.google,
-      accessToken: token,
-      clientId: profile.clientId,
-      clientSecret: profile.clientSecret,
-      redirectUri: profile.redirectUri
-    };
-    await account.save();
-
-    return oauth2Client;
   };
 
   try {
@@ -61,38 +74,14 @@ async function refreshTokenIfNeeded(account) {
       throw new Error('No refresh token available. User needs to re-authenticate.');
     }
 
-    // First try with active profile
-    try {
-      const activeProfile = await ApiProfile.findOne({ isActive: true });
-      if (!activeProfile) {
-        throw new Error('No active profile found');
-      }
-      return await tryWithProfile(activeProfile);
-    } catch (activeProfileError) {
-      console.warn('Active profile failed, trying others...', activeProfileError.message);
-      
-      // If active profile fails, try all profiles in order
-      const allProfiles = await ApiProfile.find().sort({ createdAt: -1 });
-      if (allProfiles.length === 0) {
-        throw new Error('No API profiles available');
-      }
-
-      for (const profile of allProfiles) {
-        try {
-          return await tryWithProfile(profile);
-        } catch (profileError) {
-          console.warn(`Failed with profile ${profile._id}:`, profileError.message);
-          continue;
-        }
-      }
-
-      throw new Error('All profile attempts failed');
-    }
+    return await tryWithGoogleCredentials(account.google);
   } catch (error) {
     console.error('Token refresh failed:', error);
     throw new Error(error.message || 'Failed to refresh token');
   }
 }
+
+
 function addRandomEmojis(text) {
   const emojis = ['🎉', '🔥', '🚀', '💯', '✨', '😎', '👍', '🤩', '🥳'];
   const randomEmojis = Array.from({ length: 3 }, () => 
@@ -114,10 +103,7 @@ async function postComment(commentId) {
       return;
     }
 
-    // 2. Track if we need to switch profiles
- 
-
-    // Get comment from database
+    // Get comment from database and populate the YouTube account with proxy details
     const comment = await CommentModel.findById(commentId)
       .populate({
         path: "youtubeAccount",
@@ -128,9 +114,7 @@ async function postComment(commentId) {
       throw new Error("Comment not found");
     }
 
-
     const account = comment.youtubeAccount;
- 
 
     // Check account status
     if (account.status !== "active") {
@@ -139,11 +123,26 @@ async function postComment(commentId) {
     }
 
     // Refresh token if needed
-
     const oauth2Client = await refreshTokenIfNeeded(account);
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-   
 
+    // Fetch and create the proxy agent if available
+    const proxy = account.proxy;
+    let agent;
+    if (proxy) {
+      console.log(`Using proxy: ${proxy.url}`);
+
+      // Use the helper function to create the proxy agent
+      agent = await createProxyAgent(proxy);
+      
+      // Set the proxy agent for requests made by YouTube API
+      youtube.request = axios.create({
+        httpsAgent: agent,
+        httpAgent: agent,
+      });
+    } else {
+      console.warn('No proxy found for this YouTube account');
+    }
 
     if (!comment.content || comment.content.trim() === '') {
       throw new Error("Comment content is empty");
@@ -153,7 +152,7 @@ async function postComment(commentId) {
     if (!sanitizedContent) {
       throw new Error("Comment content is empty after trimming");
     }
-    
+
     const commentData = {
       snippet: {
         videoId: comment.videoId,
@@ -165,7 +164,6 @@ async function postComment(commentId) {
       },
     };
 
-    
     // Add parent ID for replies if available
     if (comment.parentId) {
       commentData.snippet.parentId = comment.parentId;
@@ -173,20 +171,16 @@ async function postComment(commentId) {
     } else {
       console.log("Posting a top-level comment to videoId:", comment.videoId);
     }
-    
 
+    // Post the comment using YouTube API
     const response = await youtube.commentThreads.insert({
       part: "snippet",
       requestBody: commentData,
-      Comments:  sanitizedContent
     });
-
 
     // Update comment with ID from YouTube
     const commentThread = response.data;
     const youtubeCommentId = commentThread.id;
-
-
 
     await updateDailyUsage(account._id, "commentCount");
 
@@ -196,11 +190,9 @@ async function postComment(commentId) {
       activeProfile._id,
       {
         $inc: { usedQuota: 50 }, // Increment usedQuota by 50
-
       },
       { new: true, upsert: true } // Create the document if it doesn't exist
     );
-    
 
     return {
       success: true,
@@ -232,7 +224,6 @@ async function postComment(commentId) {
     };
   }
 }
-
 
 /**
  * Update daily usage counter for a YouTube account

@@ -1,6 +1,5 @@
-
-const HttpProxyAgent = require('http-proxy-agent');
-const HttpsProxyAgent = require('https-proxy-agent');
+const HttpProxyAgent = require('http-proxy-agent').HttpProxyAgent;
+const HttpsProxyAgent = require('https-proxy-agent').HttpsProxyAgent;
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const { ProxyModel } = require('../models/proxy.model');
 
