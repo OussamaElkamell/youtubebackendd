@@ -52,7 +52,8 @@ const ScheduleSchema = new mongoose.Schema({
     },
     startDate: Date,
     endDate: Date,
-    cronExpression: String, // For recurring schedules
+    cronExpression: String, 
+    errorMessage: String,
     interval: {
       type: {
         value: { type: Number, required: false },

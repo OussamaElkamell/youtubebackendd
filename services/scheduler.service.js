@@ -147,7 +147,7 @@ async function processSchedule(scheduleId) {
     // Get schedule with accounts
     const schedule = await ScheduleModel.findById(scheduleId)
       .populate('selectedAccounts');
-    
+      console.log("round robin",schedule);
     if (!schedule || schedule.status !== 'active') {
       console.log(`Schedule ${scheduleId} is no longer active`);
       return false;
@@ -203,6 +203,8 @@ async function processSchedule(scheduleId) {
         // Randomly select from available accounts
         const randomIndex = Math.floor(Math.random() * schedule.selectedAccounts.length);
         const randomAccount = schedule.selectedAccounts[randomIndex];
+    
+        
         if (randomAccount && randomAccount.status === 'active') {
           accounts = [randomAccount];
         }
@@ -219,7 +221,7 @@ async function processSchedule(scheduleId) {
           });
         break;
     }
-    
+    console.log("round robin",accounts);
     // No active accounts
     if (accounts.length === 0) {
       console.log(`Schedule ${scheduleId} has no active accounts`);
@@ -292,13 +294,17 @@ async function processSchedule(scheduleId) {
                 
                 // Update schedule progress
                 schedule.progress.postedComments += 1;
+                schedule.errorMessage="No error"
                 await schedule.save();
               } else {
                 comment.status = 'failed';
                 comment.errorMessage = result.error;
+                schedule.errorMessage=result.error
                 comment.retryCount += 1;
-                await comment.save();
+                console.log("erorr exceeded");
                 
+                await comment.save();
+                schedule.status = 'paused';
                 // Update schedule progress
                 schedule.progress.failedComments += 1;
                 await schedule.save();
@@ -311,7 +317,8 @@ async function processSchedule(scheduleId) {
               comment.errorMessage = error.message;
               comment.retryCount += 1;
               await comment.save();
-              
+              schedule.status = 'error';
+        
               // Update schedule progress
               schedule.progress.failedComments += 1;
               await schedule.save();

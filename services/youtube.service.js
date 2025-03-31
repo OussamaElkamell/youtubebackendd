@@ -105,16 +105,19 @@ async function postComment(commentId) {
 
     // Get comment from database and populate the YouTube account with proxy details
     const comment = await CommentModel.findById(commentId)
-      .populate({
-        path: "youtubeAccount",
-        populate: { path: "proxy" },
-      });
+    .populate({
+      path: "youtubeAccount",
+      populate: { path: "proxy" },
+    })
+    .exec();
+  
 
     if (!comment) {
       throw new Error("Comment not found");
     }
 
     const account = comment.youtubeAccount;
+
 
     // Check account status
     if (account.status !== "active") {
@@ -200,7 +203,8 @@ async function postComment(commentId) {
       message: "Comment posted successfully",
     };
   } catch (error) {
-    console.error("Error posting comment:", error);
+
+    console.log("errorrrrrrrrrrrr",error.message)
 
     // Check for quota exceeded error
     if (

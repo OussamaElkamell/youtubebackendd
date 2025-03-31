@@ -2,11 +2,56 @@ const HttpProxyAgent = require('http-proxy-agent').HttpProxyAgent;
 const HttpsProxyAgent = require('https-proxy-agent').HttpsProxyAgent;
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const { ProxyModel } = require('../models/proxy.model');
-
+const { ProxyAgent } = require('undici');
 /**
  * Create a proxy agent for a given proxy
  * @param {Object|String} proxy Proxy object or ID
  */
+// async function createProxyAgent(proxy) {
+//   try {
+//     // If proxy is an ID, fetch it from the database
+//     if (typeof proxy === 'string') {
+//       proxy = await ProxyModel.findById(proxy);
+//       if (!proxy) {
+//         throw new Error('Proxy not found');
+//       }
+//     }
+    
+//     // Check if proxy is active
+//     if (proxy.status !== 'active') {
+//       throw new Error(`Proxy is ${proxy.status}`);
+//     }
+    
+//     // Build proxy URL
+//     let proxyUrl;
+//     if (proxy.protocol === 'socks5') {
+//       // SOCKS proxy has a different URL format
+//       proxyUrl = `socks5://${proxy.username && proxy.password ? 
+//         `${proxy.username}:${proxy.password}@` : ''}${proxy.host}:${proxy.port}`;
+//     } else {
+//       // HTTP/HTTPS proxy URL
+//       proxyUrl = `${proxy.protocol}://${proxy.username && proxy.password ? 
+//         `${proxy.username}:${proxy.password}@` : ''}${proxy.host}:${proxy.port}`;
+//     }
+    
+//     // Create appropriate agent
+//     let agent;
+//     if (proxy.protocol === 'http') {
+//       agent = new HttpProxyAgent(proxyUrl);
+//     } else if (proxy.protocol === 'https') {
+//       agent = new HttpsProxyAgent(proxyUrl);
+//     } else if (proxy.protocol === 'socks5') {
+//       agent = new SocksProxyAgent(proxyUrl);
+//     } else {
+//       throw new Error(`Unsupported proxy protocol: ${proxy.protocol}`);
+//     }
+    
+//     return agent;
+//   } catch (error) {
+//     console.error('Error creating proxy agent:', error);
+//     return null;
+//   }
+// }
 async function createProxyAgent(proxy) {
   try {
     // If proxy is an ID, fetch it from the database
@@ -16,43 +61,32 @@ async function createProxyAgent(proxy) {
         throw new Error('Proxy not found');
       }
     }
-    
+
     // Check if proxy is active
     if (proxy.status !== 'active') {
       throw new Error(`Proxy is ${proxy.status}`);
     }
+
+    // Construct proxy URL
+    const proxyUrl = `${proxy.protocol}://${proxy.username && proxy.password ? 
+      `${proxy.username}:${proxy.password}@` : ''}${proxy.host}:${proxy.port}`;
+
+    // Create ProxyAgent using undici
+    const agent = new ProxyAgent(proxyUrl);
+
+    // Test the proxy by making a request
+    const url = 'https://ipv4.icanhazip.com';
+    const response = await fetch(url, { dispatcher: agent });
+    const data = await response.text();
     
-    // Build proxy URL
-    let proxyUrl;
-    if (proxy.protocol === 'socks5') {
-      // SOCKS proxy has a different URL format
-      proxyUrl = `socks5://${proxy.username && proxy.password ? 
-        `${proxy.username}:${proxy.password}@` : ''}${proxy.host}:${proxy.port}`;
-    } else {
-      // HTTP/HTTPS proxy URL
-      proxyUrl = `${proxy.protocol}://${proxy.username && proxy.password ? 
-        `${proxy.username}:${proxy.password}@` : ''}${proxy.host}:${proxy.port}`;
-    }
-    
-    // Create appropriate agent
-    let agent;
-    if (proxy.protocol === 'http') {
-      agent = new HttpProxyAgent(proxyUrl);
-    } else if (proxy.protocol === 'https') {
-      agent = new HttpsProxyAgent(proxyUrl);
-    } else if (proxy.protocol === 'socks5') {
-      agent = new SocksProxyAgent(proxyUrl);
-    } else {
-      throw new Error(`Unsupported proxy protocol: ${proxy.protocol}`);
-    }
-    
+    console.log('Proxy IP:', data);
+
     return agent;
   } catch (error) {
     console.error('Error creating proxy agent:', error);
     return null;
   }
 }
-
 /**
  * Assign a random active proxy to an account
  * @param {String} userId User ID
