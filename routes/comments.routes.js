@@ -14,27 +14,42 @@ const router = express.Router();
  */
 router.get('/', authenticateJWT, async (req, res, next) => {
   try {
-    const { status, page = 1, limit = 20 } = req.query;
+    const { status, page = 1, limit = 1000 } = req.query;
     
     const query = { user: req.user.id };
-    
+
     // Filter by status if provided
     if (status) {
       query.status = status;
     }
-    
+
+    // Get the current date and calculate the date for 7 days ago
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    // Fetch the comments based on the query with pagination
     const comments = await CommentModel.find(query)
       .populate('youtubeAccount', 'email channelTitle status')
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(parseInt(limit));
-      
+
+    // Get the total number of comments before pagination
     const total = await CommentModel.countDocuments(query);
-    
+
+    // Get the total number of comments with status 'posted' in the last 7 days
+    const totalPostedLast7Days = await CommentModel.countDocuments({
+      ...query,
+      status: 'posted',
+      createdAt: { $gte: sevenDaysAgo }  // Only comments from the last 7 days
+    });
+
+    // Send the response with both total comments and total posted comments in the last 7 days
     res.json({
       comments,
       pagination: {
         total,
+        totalPostedLast7Days, // Add the total number of 'posted' comments in the last 7 days
         page: parseInt(page),
         limit: parseInt(limit),
         pages: Math.ceil(total / limit)
@@ -44,6 +59,7 @@ router.get('/', authenticateJWT, async (req, res, next) => {
     next(error);
   }
 });
+
 
 /**
  * @route POST /api/comments

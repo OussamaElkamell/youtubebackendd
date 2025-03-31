@@ -114,9 +114,9 @@ async function postComment(commentId) {
       return;
     }
 
-
+    // 2. Track if we need to switch profiles
  
-    
+
     // Get comment from database
     const comment = await CommentModel.findById(commentId)
       .populate({
