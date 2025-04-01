@@ -64,7 +64,7 @@ async function createProxyAgent(proxy) {
     }
   
     // Ensure proxy credentials are correctly formatted
-    const authPart = `zbeast:ahmadi58@`;
+    const authPart = `${proxy.username}:${proxy.password}@`;
     const proxyUrl = `${proxy.protocol}://${authPart}${proxy.host}:${proxy.port}`;
 
     console.log("Proxy URL:", proxyUrl);

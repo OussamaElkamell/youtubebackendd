@@ -97,11 +97,6 @@ function addRandomEmojis(text) {
  */
 async function postComment(commentId) {
   try {
-    const allProfiles = await ApiProfile.find().sort({ isActive: -1, createdAt: -1 });
-    if (allProfiles.length === 0) {
-      console.warn('No API profiles available');
-      return;
-    }
 
     // Get comment from database and populate the YouTube account with proxy details
     const comment = await CommentModel.findById(commentId)
@@ -117,7 +112,15 @@ async function postComment(commentId) {
     }
 
     const account = comment.youtubeAccount;
+    if (!account || account.status === null || account.youtubeAccount === null) {
+      console.warn('Account status or youtubeAccount is null, deleting comment...');
+      await comment.deleteOne();
 
+      return {
+        success: false,
+        message: 'Comment deleted due to invalid account or status',
+      };
+    }
 
     // Check account status
     if (account.status !== "active") {
@@ -187,16 +190,7 @@ async function postComment(commentId) {
 
     await updateDailyUsage(account._id, "commentCount");
 
-    let activeProfile = allProfiles.find(p => p.isActive) || allProfiles[0];
-
-    const updatedProfile = await ApiProfile.findByIdAndUpdate(
-      activeProfile._id,
-      {
-        $inc: { usedQuota: 50 }, // Increment usedQuota by 50
-      },
-      { new: true, upsert: true } // Create the document if it doesn't exist
-    );
-
+ 
     return {
       success: true,
       commentId: youtubeCommentId,

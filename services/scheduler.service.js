@@ -3,6 +3,7 @@ const cron = require('node-cron');
 const { ScheduleModel } = require('../models/schedule.model');
 const { CommentModel } = require('../models/comment.model');
 const { YouTubeAccountModel } = require('../models/youtube-account.model');
+const ApiProfile = require('../models/ApiProfile');
 const { postComment } = require('./youtube.service');
 const { assignRandomProxy } = require('./proxy.service');
 const axios = require('axios');
@@ -135,7 +136,63 @@ async function setupScheduleJob(scheduleId) {
     return false;
   }
 }
+async function updateProfileQuota(result) {
+  // Fetch all profiles sorted by active status
+  const allProfiles = await ApiProfile.find().sort({ isActive: -1, createdAt: -1 });
 
+  if (allProfiles.length === 0) {
+      console.warn("No API profiles available");
+      return;
+  }
+
+  // Find the active profile or fallback to the first one
+  let activeProfile = allProfiles.find(p => p.isActive) || allProfiles[0];
+
+  if (!activeProfile) {
+      console.warn("No active profile found");
+      return;
+  }
+
+  if (result.error?.includes("The request cannot be completed because you have exceeded")) {
+      console.log(`Profile ${activeProfile._id} exceeded quota.`);
+
+      await ApiProfile.findByIdAndUpdate(activeProfile._id, {
+          usedQuota: 10000,
+          status: "exceeded",
+          exceededAt: new Date(), // Timestamp for reset tracking
+      });
+
+  } else {
+      // If the profile is marked "exceeded," check if 24 hours have passed
+      if (activeProfile.status === "exceeded") {
+          const exceededAt = activeProfile.exceededAt || new Date(); 
+          const now = new Date();
+          const hoursPassed = (now.getTime() - new Date(exceededAt).getTime()) / (1000 * 60 * 60);
+
+          if (hoursPassed >= 24) {
+              console.log(`Resetting profile ${activeProfile._id} quota after 24 hours.`);
+              
+              await ApiProfile.findByIdAndUpdate(activeProfile._id, {
+                  usedQuota: 0,
+                  status: "not exceeded",
+                  exceededAt: null,
+              });
+          } else {
+              console.log(`Profile ${activeProfile._id} still exceeded. ${24 - hoursPassed} hours left.`);
+              return;
+          }
+      }
+
+      if (result.success) {
+        console.log(`Incrementing quota for profile ${activeProfile._id}`);
+        await ApiProfile.findByIdAndUpdate(activeProfile._id, {
+            $inc: { usedQuota: 50 },
+            status: "not exceeded",
+        });
+    }
+    
+  }
+}
 /**
  * Process a schedule by posting comments
  * @param {String} scheduleId Schedule ID
@@ -147,7 +204,7 @@ async function processSchedule(scheduleId) {
     // Get schedule with accounts
     const schedule = await ScheduleModel.findById(scheduleId)
       .populate('selectedAccounts');
-      console.log("round robin",schedule);
+   
     if (!schedule || schedule.status !== 'active') {
       console.log(`Schedule ${scheduleId} is no longer active`);
       return false;
@@ -221,7 +278,7 @@ async function processSchedule(scheduleId) {
           });
         break;
     }
-    console.log("round robin",accounts);
+  
     // No active accounts
     if (accounts.length === 0) {
       console.log(`Schedule ${scheduleId} has no active accounts`);
@@ -274,17 +331,16 @@ async function processSchedule(scheduleId) {
           });
           
           await comment.save();
-          
-          // Update schedule progress
-          schedule.progress.totalComments += 1;
-          await schedule.save();
-          
+          await ScheduleModel.findByIdAndUpdate(schedule._id, {
+            $inc: { 'progress.totalComments': 1 }
+          });
           // Post comment after delay
           setTimeout(async () => {
             try {
               const result = await postComment(comment._id);
               console.log("resullllt",result);
-              
+              await updateProfileQuota(result) 
+                
               // Update comment status
               if (result.success) {
                 comment.status = 'posted';
@@ -293,35 +349,49 @@ async function processSchedule(scheduleId) {
                 await comment.save();
                 
                 // Update schedule progress
-                schedule.progress.postedComments += 1;
-                schedule.errorMessage="No error"
-                await schedule.save();
+                await ScheduleModel.findByIdAndUpdate(schedule._id, {
+                  $inc: { 'progress.postedComments': 1 },
+                  $set: { errorMessage: "No error" }
+                });
               } else {
-                comment.status = 'failed';
-                comment.errorMessage = result.error;
-                schedule.errorMessage=result.error
-                comment.retryCount += 1;
-                console.log("erorr exceeded");
-                
-                await comment.save();
-                schedule.status = 'paused';
-                // Update schedule progress
-                schedule.progress.failedComments += 1;
-                await schedule.save();
+        // Update comment (atomic operation)
+await CommentModel.findByIdAndUpdate(comment._id, {
+  $set: { 
+    status: 'failed',
+    errorMessage: result.error
+  },
+  $inc: { retryCount: 1 }
+});
+
+// Update schedule (atomic operation)
+await ScheduleModel.findByIdAndUpdate(schedule._id, {
+  $set: { 
+    status: 'paused',
+    errorMessage: result.error
+  },
+  $inc: { 'progress.failedComments': 1 }
+});
+
+
               }
             } catch (error) {
               console.error(`Error posting comment for schedule ${scheduleId}:`, error);
               
-              // Update comment as failed
-              comment.status = 'failed';
-              comment.errorMessage = error.message;
-              comment.retryCount += 1;
-              await comment.save();
-              schedule.status = 'error';
-        
-              // Update schedule progress
-              schedule.progress.failedComments += 1;
-              await schedule.save();
+          // Update both documents using atomic operations
+await Promise.all([
+  CommentModel.findByIdAndUpdate(comment._id, {
+    $set: {
+      status: 'failed',
+      errorMessage: error.message
+    },
+    $inc: { retryCount: 1 }
+  }),
+  
+  ScheduleModel.findByIdAndUpdate(schedule._id, {
+    $set: { status: 'paused' },
+    $inc: { 'progress.failedComments': 1 }
+  })
+]);
             }
           }, commentDelay * 1000);
         }

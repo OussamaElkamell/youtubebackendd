@@ -96,26 +96,43 @@ const updateAccount = async (req, res, next) => {
       });
       
       // If proxy doesn't exist, create a new one
-      if (!proxyObj) {
-        const [host, port] = proxy.split(':'); // Assuming the proxy format is 'host:port'
+// If proxy doesn't exist, create a new one
+if (!proxyObj) {
+  const proxyParts = proxy.split(':'); // Split the proxy string into parts
 
-        // Ensure valid host and port
-        if (!host || !port) {
-          return res.status(400).json({ message: 'Invalid proxy format. Expected host:port.' });
-        }
+  // Ensure we have at least host and port
+  if (proxyParts.length < 2) {
+    return res.status(400).json({ 
+      message: 'Invalid proxy format. Expected host:port or host:port:username:password.' 
+    });
+  }
 
-        // Create a new Proxy object
-        proxyObj = new ProxyModel({
-          proxy: proxy,
-          host: host,        // Set extracted host
-          port: parseInt(port, 10),  // Set extracted port (convert to number)
-          user: req.user.id
-        });
-        await proxyObj.save(); // Save the new proxy to the database
-      }
-      
-      // Assign the proxy ID to the account
-      account.proxy = proxyObj._id;
+  const [host, port] = proxyParts;
+  const username = proxyParts.length >= 3 ? proxyParts[2] : null;
+  const password = proxyParts.length >= 4 ? proxyParts[3] : null;
+
+  // Validate host and port
+  if (!host || !port || isNaN(parseInt(port, 10))) {
+    return res.status(400).json({ 
+      message: 'Invalid proxy format. Host and port (must be a number) are required.' 
+    });
+  }
+
+  // Create a new Proxy object
+  proxyObj = new ProxyModel({
+    proxy: proxy,
+    host: host.trim(),
+    port: parseInt(port, 10),
+    username: username ? username.trim() : null,
+    password: password ? password.trim() : null,
+    user: req.user.id
+  });
+  
+  await proxyObj.save(); // Save the new proxy to the database
+}
+
+// Assign the proxy ID to the account
+account.proxy = proxyObj._id;
     }
     
     await account.save();
