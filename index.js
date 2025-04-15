@@ -46,11 +46,11 @@ app.use(express.urlencoded({ extended: true }));
 // Setup rate limiting
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000000, // Limit each IP to 100 requests per windowMs
+  max: 10000000000000, // Limit each IP to 100 requests per windowMs
   standardHeaders: true,
   legacyHeaders: false
 });
-app.use('/api');
+app.use('/api', apiLimiter);
 
 // Setup Passport.js for Google OAuth
 setupPassport();
