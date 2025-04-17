@@ -268,7 +268,9 @@ function setupWorkers() {
           }
         );
       }
-      
+      if (result.success) {
+        await updateProfileQuota(comment.youtubeAccount._id);
+      }
       // Mark account as inactive on failure
       if (!result.success && comment.youtubeAccount._id) {
         await YouTubeAccountModel.updateOne(
@@ -278,7 +280,7 @@ function setupWorkers() {
       }
       
       await Promise.all([
-        updateProfileQuota(result),
+   
         updateCommentStatus(commentId, result)
       ]);
       
@@ -643,32 +645,30 @@ function setupMaintenanceJob() {
 }
 
 // Profile quota management
-async function updateProfileQuota(result) {
+async function updateProfileQuota(youtubeAccountId) {
   try {
-    const allProfiles = await ApiProfile.find().sort({ isActive: -1, createdAt: -1 }).lean();
-    if (allProfiles.length === 0) {
-      console.warn("No API profiles available");
+    const account = await YouTubeAccountModel.findById(youtubeAccountId);
+    if (!account || !account.google.profileId) {
+      console.warn(`Account ${youtubeAccountId} or associated profile not found`);
       return;
     }
 
-
-    let activeProfile = allProfiles.find(p => p.isActive) || allProfiles[0];
-    if (!activeProfile) {
-      console.warn("No active profile found");
+    const profile = await ApiProfile.findById(account.google.profileId);
+    if (!profile) {
+      console.warn(`Profile ${account.google.profileId} not found`);
       return;
     }
 
-    if (result.error?.includes("The request cannot be completed because you have exceeded")) {
-      console.log(`Profile ${activeProfile._id} exceeded quota.`);
-      
-      const activeSchedules = await ScheduleModel.find({ status: 'active' });
+    // Increment the usedQuota by 50
+    profile.usedQuota += 50;
+    await profile.save();
 
-
-    } 
+    console.log(`Profile ${profile._id} usedQuota updated. New value: ${profile.usedQuota}`);
   } catch (error) {
     console.error('Error updating profile quota:', error);
   }
 }
+
 
 // Graceful shutdown
 async function shutdown() {
