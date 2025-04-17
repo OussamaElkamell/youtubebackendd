@@ -69,7 +69,7 @@ function calculateOptimizedDelay(delays) {
 async function initRedis() {
   try {
     redisClient = createClient({
-      url : "rediss://default:ATp1AAIjcDEzNmIyMjVlYjM1MzY0MTdhOTZhZDUwY2FiOGZkNWY4NnAxMA@main-catfish-14965.upstash.io:6379",
+      url : process.env.REDIS_URL,
       
       socket: {
         tls: true,
