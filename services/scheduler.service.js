@@ -243,31 +243,47 @@ function setupWorkers() {
       }
   
       const result = await postComment(commentId);
-  // Update the schedule's progress based on the result
-  const updateProgress = result.success
-  ? { $inc: { 'progress.postedComments': 1 } }
-  : { $inc: { 'progress.failedComments': 1 } };
 
-await ScheduleModel.updateOne(
-  { _id: scheduleId }, // Use the passed scheduleId
-  updateProgress
-);
+      // Update the schedule's progress based on the result
+      const updateProgress = result.success
+        ? { $inc: { 'progress.postedComments': 1 } }
+        : { $inc: { 'progress.failedComments': 1 } };
+      
+      await ScheduleModel.updateOne(
+        { _id: scheduleId }, // Use the passed scheduleId
+        updateProgress
+      );
+      
+      // Save the result to the YouTube account
+      if (comment.youtubeAccount._id) {
+        await YouTubeAccountModel.updateOne(
+          { _id: comment.youtubeAccount._id },
+          {
+            $set: {
+              lastMessage: result.success
+                ? 'Comment posted successfully'
+                : result.error || 'Unknown error', // Save the success or error message
+              status: result.success ? 'active' : 'inactive', // Update status based on success/failure
+            },
+          }
+        );
+      }
+      
       // Mark account as inactive on failure
       if (!result.success && comment.youtubeAccount._id) {
         await YouTubeAccountModel.updateOne(
           { _id: comment.youtubeAccount._id },
-          { status: 'inactive' }
+          { status: 'inactive' } // Ensure account is inactive on failure
         );
       }
-  
       
-  
       await Promise.all([
         updateProfileQuota(result),
         updateCommentStatus(commentId, result)
       ]);
-  
+      
       return result;
+      
     } catch (error) {
       console.error(`Error processing comment ${commentId}:`, error);
       await handleCommentError(commentId, error);
@@ -644,88 +660,11 @@ async function updateProfileQuota(result) {
 
     if (result.error?.includes("The request cannot be completed because you have exceeded")) {
       console.log(`Profile ${activeProfile._id} exceeded quota.`);
-      await Promise.all([
-        CommentModel.deleteMany({ status: "pending" }),
-        ApiProfile.updateOne(
-          { _id: activeProfile._id },
-          { 
-            usedQuota: 10000,
-            status: "exceeded",
-            exceededAt: new Date()
-          }
-        ),
-        
-        redisClient.set(`profile:${activeProfile._id}:status`, "exceeded", { EX: 3600 })
-      ]);
+      
       const activeSchedules = await ScheduleModel.find({ status: 'active' });
 
-await Promise.all(
-  activeSchedules.map(async (schedule) => {
-    const accountIds = schedule.selectedAccounts;
 
-    if (!accountIds || accountIds.length === 0) return;
-
-    // Fetch the statuses of selected accounts
-    const accounts = await YouTubeAccountModel.find({ _id: { $in: accountIds } });
-
-    // Check if all selected accounts are inactive
-    const allInactive = accounts.every(account => account.status !== 'active');
-
-    if (allInactive) {
-      await ScheduleModel.findByIdAndUpdate(schedule._id, {
-        $set: { status: 'paused' },
-      });
-    }
-  })
-);
-      console.log(`Paused ${activeSchedules.length} schedules due to quota exceed.`);
-
-          const multi = redisClient.multi();
-          activeSchedules.forEach(schedule => {
-            multi.set(`schedule:${schedule._id}`, JSON.stringify({
-              id: schedule._id.toString(),
-              status: 'paused',
-              type: schedule.schedule.type,
-              user: schedule.user.toString(),
-              error: 'API quota exceeded'
-            }), { EX: 86400 });
-          });
-          const redisResult = await multi.exec();
-          if (!redisResult) {
-            console.warn('Redis multi.exec() failed or returned null');
-          }
-    } else {
-      if (activeProfile.status === "exceeded") {
-        
-        const hoursPassed = (Date.now() - new Date(activeProfile.exceededAt).getTime()) / (1000 * 60 * 60);
-        if (hoursPassed >= 24) {
-          await Promise.all([
-            ApiProfile.updateOne(
-              { _id: activeProfile._id },
-              { 
-                usedQuota: 0,
-                status: "not exceeded",
-                exceededAt: null
-              }
-            ),
-            redisClient.set(`profile:${activeProfile._id}:status`, "not exceeded", { EX: 3600 })
-          ]);
-        }
-      }
-
-      if (result.success) {
-        await Promise.all([
-          ApiProfile.updateOne(
-            { _id: activeProfile._id },
-            { 
-              $inc: { usedQuota: 50 },
-              status: "not exceeded"
-            }
-          ),
-          redisClient.set(`profile:${activeProfile._id}:quota`, String((activeProfile.usedQuota || 0) + 50), { EX: 3600 })
-        ]);
-      }
-    }
+    } 
   } catch (error) {
     console.error('Error updating profile quota:', error);
   }

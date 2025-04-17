@@ -14,7 +14,7 @@ const router = express.Router();
  */
 router.get('/', authenticateJWT, async (req, res, next) => {
   try {
-    const { status, page = 1, limit = 1000 } = req.query;
+    const { status, page = 1, limit = 100000 } = req.query;
     
     const query = { user: req.user.id };
 

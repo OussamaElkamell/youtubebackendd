@@ -69,6 +69,7 @@ const YouTubeAccountSchema = new mongoose.Schema({
       required: true
     }
   },
+  lastMessage:String,
   createdAt: {
     type: Date,
     default: Date.now
