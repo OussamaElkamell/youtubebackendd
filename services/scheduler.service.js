@@ -247,11 +247,7 @@ function setupWorkers() {
  
       const quotaExceeded =
       result.error?.includes("quota") ||
-      result.error?.includes("dailyLimitExceeded") ||
-      result.error?.some(e =>
-        ["quota"].includes(e.reason)
-      );
-    
+      result.error?.includes("dailyLimitExceeded")
       // Update the schedule's progress based on the result
       const updateProgress = result.success
         ? { $inc: { 'progress.postedComments': 1 } }
