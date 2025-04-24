@@ -349,7 +349,7 @@ const resetQuotaWorker = new Worker('resetQuotaQueue', async job => {
 
         // Activate related YouTube accounts
         const updatedAccounts = await YouTubeAccountModel.updateMany(
-          { 'google.profileId': profile._id },
+          { 'google.profileId': profileId },
           { $set: { status: 'active' } }
         );
 
