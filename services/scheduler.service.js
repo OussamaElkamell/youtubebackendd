@@ -327,49 +327,47 @@ await handleQuotaExceeded(comment.youtubeAccount.google.profileId);
     }
   });
 
-const resetQuotaWorker = new Worker('resetQuotaQueue', async job => {
-  const { profileId } = job.data;
-
-  try {
-    const profile = await ApiProfile.findById(profileId);
-
-    if (profile && profile.status === "exceeded") {
-      const now = new Date();
-      const exceededDuration = now - new Date(profile.exceededAt);
-
-      if (exceededDuration >= 24 * 60 * 60 * 1000) {
+  const resetQuotaWorker = new Worker('resetQuotaQueue', async job => {
+    try {
+      // Find all profiles that used quota or are marked as "exceeded"
+      const profiles = await ApiProfile.find({
+        $or: [
+          { usedQuota: { $gt: 0 } },
+          { status: "exceeded" }
+        ]
+      });
+  
+      for (const profile of profiles) {
         console.log(`Resetting quota for profile: ${profile.name}`);
-
+  
         // Reset profile
         await ApiProfile.findByIdAndUpdate(profile._id, {
           usedQuota: 0,
           status: "not exceeded",
           exceededAt: null
         });
-
+  
         // Activate related YouTube accounts
         const updatedAccounts = await YouTubeAccountModel.updateMany(
-          { 'google.profileId': profileId },
+          { 'google.profileId': profile._id },
           { $set: { status: 'active' } }
         );
-
+  
         console.log(`Updated ${updatedAccounts.modifiedCount} YouTube accounts for profile ${profile.name}`);
-      } else {
-        console.log(`Reset attempt too early for profile ${profile.name}.`);
       }
+    } catch (err) {
+      console.error(`Error during quota reset job:`, err);
     }
-  } catch (err) {
-    console.error(`Error resetting quota for profile ${profileId}:`, err);
-  }
-}, {
-  connection: {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: process.env.REDIS_PORT || 6379,
-    username: 'default',
-    password: process.env.REDIS_PASSWORD,
-    tls: {}
-  }
-});
+  }, {
+    connection: {
+      host: process.env.REDIS_HOST || 'localhost',
+      port: process.env.REDIS_PORT || 6379,
+      username: 'default',
+      password: process.env.REDIS_PASSWORD,
+      tls: {}
+    }
+  });
+  
 
   // Worker event handlers
   scheduleWorker.on('completed', (job, result) => {
@@ -406,59 +404,42 @@ const resetQuotaQueue = new Queue('resetQuotaQueue', {
     tls: {}, // Optional, if you use Redis with TLS/SSL
   },
 });
-
+// Schedule the reset to run daily at midnight PT
+await resetQuotaQueue.add('dailyReset', {}, {
+  repeat: {
+    cron: '0 8 * * *', // 08:00 UTC = Midnight PT
+    tz: 'America/Los_Angeles'
+  }
+});
 async function handleQuotaExceeded(profileId) {
   try {
-    // First, try to update the profile status if it's not already 'exceeded'
+    // Mark the profile as exceeded (only if not already)
     const updateResult = await ApiProfile.updateOne(
       { _id: profileId, status: { $ne: 'exceeded' } },
       {
         $set: {
           status: 'exceeded',
           exceededAt: new Date(),
-          usedQuota: "10000"
+          usedQuota: 10000
         }
       }
     );
 
-    // If nothing was modified, the status was already 'exceeded'
     if (updateResult.modifiedCount === 0) {
       console.log(`Profile ${profileId} is already marked as exceeded.`);
     } else {
       console.log(`Profile ${profileId} marked as exceeded.`);
     }
 
-    // Retrieve the updated profile's exceededAt timestamp
-    const profile = await ApiProfile.findById(profileId);
-    if (!profile || !profile.exceededAt) {
-      console.warn(`Could not retrieve exceededAt timestamp for profile ${profileId}`);
-      return;
-    }
+    // No need to schedule a specific reset job here anymore,
+    // because the global reset worker runs daily at midnight PT.
+    console.log(`Quota reset will be handled by global daily reset job.`);
 
-    const resetTime = new Date(profile.exceededAt).getTime() + (24 * 60 * 60 * 1000); // 24h later
-    const delay = resetTime - Date.now();
-
-    if (delay <= 0) {
-      console.log(`Quota reset time already passed for profile ${profileId}, resetting immediately.`);
-      await resetQuotaQueue.add('resetQuota', { profileId }, {
-        jobId: `resetQuotaJob-${profileId}`,
-        removeOnComplete: true,
-        removeOnFail: { count: 3 }
-      });
-    } else {
-      await resetQuotaQueue.add('resetQuota', { profileId }, {
-        delay,
-        jobId: `resetQuotaJob-${profileId}`, // Prevent duplicate jobs
-        removeOnComplete: true,
-        removeOnFail: { count: 3 }
-      });
-
-      console.log(`Scheduled quota reset for profile ${profileId} in ${(delay / 1000 / 60).toFixed(1)} minutes.`);
-    }
   } catch (error) {
-    console.error(`Error scheduling quota reset for profile ${profileId}:`, error);
+    console.error(`Error handling quota exceed for profile ${profileId}:`, error);
   }
 }
+
 
 
 
