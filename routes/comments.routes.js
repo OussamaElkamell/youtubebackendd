@@ -240,4 +240,30 @@ router.delete('/:id', authenticateJWT, async (req, res, next) => {
   }
 });
 
+/**
+ * @route DELETE /api/comments
+ * @desc Delete all 'posted' comments for the authenticated user
+ * @access Private
+ */
+router.delete('/', authenticateJWT, async (req, res, next) => {
+  try {
+    // Only delete comments where the status is 'posted'
+    const result = await CommentModel.deleteMany({
+      user: req.user.id,
+      status: 'posted'  // Only clear comments that have been posted
+    });
+
+    // If no comments were deleted, return a message
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'No posted comments to delete' });
+    }
+
+    // Successfully deleted the posted comments
+    res.json({ message: 'All posted comments deleted successfully' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+
 module.exports = router;
