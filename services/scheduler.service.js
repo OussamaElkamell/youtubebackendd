@@ -394,22 +394,33 @@ await handleQuotaExceeded(comment.youtubeAccount.google.profileId);
   });
 }
 
+async function scheduleQuotaReset() {
+  const resetQuotaQueue = new Queue('resetQuotaQueue', {
+    connection: {
+      host: process.env.REDIS_HOST || 'localhost',
+      port: process.env.REDIS_PORT || 6379,
+      username: 'default',
+      password: process.env.REDIS_PASSWORD, // Optional, only if password is set
+      tls: {}, // Optional, if you use Redis with TLS/SSL
+    },
+  });
 
-const resetQuotaQueue = new Queue('resetQuotaQueue', {
-  connection: {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: process.env.REDIS_PORT || 6379,
-    username: 'default',
-    password: process.env.REDIS_PASSWORD, // Optional, only if password is set
-    tls: {}, // Optional, if you use Redis with TLS/SSL
-  },
-});
-// Schedule the reset to run daily at midnight PT
-await resetQuotaQueue.add('dailyReset', {}, {
-  repeat: {
-    cron: '0 8 * * *', // 08:00 UTC = Midnight PT
-    tz: 'America/Los_Angeles'
-  }
+  // Schedule the reset to run daily at midnight PT (08:00 UTC)
+  await resetQuotaQueue.add('dailyReset', {}, {
+    repeat: {
+      cron: '0 8 * * *', // 08:00 UTC = Midnight PT
+      tz: 'America/Los_Angeles',
+    },
+    removeOnComplete: true,
+    removeOnFail: { count: 3 },
+  });
+
+  console.log('Quota reset scheduled successfully.');
+}
+
+// Call the function to schedule the job
+scheduleQuotaReset().catch((err) => {
+  console.error('Error scheduling quota reset:', err);
 });
 async function handleQuotaExceeded(profileId) {
   try {
