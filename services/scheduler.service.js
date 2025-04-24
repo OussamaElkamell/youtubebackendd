@@ -243,7 +243,15 @@ function setupWorkers() {
       }
   
       const result = await postComment(commentId);
-
+ 
+ 
+      const quotaExceeded =
+      result.error?.includes("quota") ||
+      result.error?.includes("dailyLimitExceeded") ||
+      result.error?.some(e =>
+        ["quota"].includes(e.reason)
+      );
+    
       // Update the schedule's progress based on the result
       const updateProgress = result.success
         ? { $inc: { 'progress.postedComments': 1 } }
@@ -268,9 +276,21 @@ function setupWorkers() {
           }
         );
       }
-      if (result.success) {
-        await updateProfileQuota(comment.youtubeAccount._id);
+      if(quotaExceeded){
+        console.log("yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyeeeeeeeeeeeeeessssssssssss");
+        
+      }else{
+        console.log ("nooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo");
+       
       }
+
+      if (result.success) {
+        console.log('Iddddddddd',comment.youtubeAccount.google.profileId);
+        
+        await updateProfileQuota(comment.youtubeAccount._id);
+      }else if (quotaExceeded) {
+await handleQuotaExceeded(comment.youtubeAccount.google.profileId);
+}        
       // Mark account as inactive on failure
       if (!result.success && comment.youtubeAccount._id) {
         await YouTubeAccountModel.updateOne(
@@ -278,7 +298,8 @@ function setupWorkers() {
           { status: 'inactive' } // Ensure account is inactive on failure
         );
       }
-      
+       
+    
       await Promise.all([
    
         updateCommentStatus(commentId, result)
@@ -301,7 +322,7 @@ function setupWorkers() {
       port: process.env.REDIS_PORT || 6379,
       username: 'default',
       password: process.env.REDIS_PASSWORD,
-      tls:{},
+      tls:{}
     },
     concurrency: 30,
     limiter: {
@@ -309,6 +330,50 @@ function setupWorkers() {
       duration: 1000
     }
   });
+
+const resetQuotaWorker = new Worker('resetQuotaQueue', async job => {
+  const { profileId } = job.data;
+
+  try {
+    const profile = await ApiProfile.findById(profileId);
+
+    if (profile && profile.status === "exceeded") {
+      const now = new Date();
+      const exceededDuration = now - new Date(profile.exceededAt);
+
+      if (exceededDuration >= 24 * 60 * 60 * 1000) {
+        console.log(`Resetting quota for profile: ${profile.name}`);
+
+        // Reset profile
+        await ApiProfile.findByIdAndUpdate(profile._id, {
+          usedQuota: 0,
+          status: "not exceeded",
+          exceededAt: null
+        });
+
+        // Activate related YouTube accounts
+        const updatedAccounts = await YouTubeAccountModel.updateMany(
+          { 'google.profileId': profile._id },
+          { $set: { status: 'active' } }
+        );
+
+        console.log(`Updated ${updatedAccounts.modifiedCount} YouTube accounts for profile ${profile.name}`);
+      } else {
+        console.log(`Reset attempt too early for profile ${profile.name}.`);
+      }
+    }
+  } catch (err) {
+    console.error(`Error resetting quota for profile ${profileId}:`, err);
+  }
+}, {
+  connection: {
+    host: process.env.REDIS_HOST || 'localhost',
+    port: process.env.REDIS_PORT || 6379,
+    username: 'default',
+    password: process.env.REDIS_PASSWORD,
+    tls: {}
+  }
+});
 
   // Worker event handlers
   scheduleWorker.on('completed', (job, result) => {
@@ -326,7 +391,80 @@ function setupWorkers() {
   commentWorker.on('failed', (job, error) => {
     console.error(`Comment job ${job.id} failed:`, error);
   });
+  resetQuotaWorker.on('completed', (job, result) => {
+    console.log(`ResetQuota job ${job.id} completed`, result);
+  });
+  
+  resetQuotaWorker.on('failed', (job, error) => {
+    console.error(`ResetQuota job ${job.id} failed:`, error);
+  });
 }
+
+
+const resetQuotaQueue = new Queue('resetQuotaQueue', {
+  connection: {
+    host: process.env.REDIS_HOST || 'localhost',
+    port: process.env.REDIS_PORT || 6379,
+    username: 'default',
+    password: process.env.REDIS_PASSWORD, // Optional, only if password is set
+    tls: {}, // Optional, if you use Redis with TLS/SSL
+  },
+});
+
+async function handleQuotaExceeded(profileId) {
+  try {
+    // First, try to update the profile status if it's not already 'exceeded'
+    const updateResult = await ApiProfile.updateOne(
+      { _id: profileId, status: { $ne: 'exceeded' } },
+      {
+        $set: {
+          status: 'exceeded',
+          exceededAt: new Date(),
+          usedQuota: "10000"
+        }
+      }
+    );
+
+    // If nothing was modified, the status was already 'exceeded'
+    if (updateResult.modifiedCount === 0) {
+      console.log(`Profile ${profileId} is already marked as exceeded.`);
+    } else {
+      console.log(`Profile ${profileId} marked as exceeded.`);
+    }
+
+    // Retrieve the updated profile's exceededAt timestamp
+    const profile = await ApiProfile.findById(profileId);
+    if (!profile || !profile.exceededAt) {
+      console.warn(`Could not retrieve exceededAt timestamp for profile ${profileId}`);
+      return;
+    }
+
+    const resetTime = new Date(profile.exceededAt).getTime() + (24 * 60 * 60 * 1000); // 24h later
+    const delay = resetTime - Date.now();
+
+    if (delay <= 0) {
+      console.log(`Quota reset time already passed for profile ${profileId}, resetting immediately.`);
+      await resetQuotaQueue.add('resetQuota', { profileId }, {
+        jobId: `resetQuotaJob-${profileId}`,
+        removeOnComplete: true,
+        removeOnFail: { count: 3 }
+      });
+    } else {
+      await resetQuotaQueue.add('resetQuota', { profileId }, {
+        delay,
+        jobId: `resetQuotaJob-${profileId}`, // Prevent duplicate jobs
+        removeOnComplete: true,
+        removeOnFail: { count: 3 }
+      });
+
+      console.log(`Scheduled quota reset for profile ${profileId} in ${(delay / 1000 / 60).toFixed(1)} minutes.`);
+    }
+  } catch (error) {
+    console.error(`Error scheduling quota reset for profile ${profileId}:`, error);
+  }
+}
+
+
 
 // Optimized schedule processing
 async function optimizedProcessSchedule(scheduleId) {
