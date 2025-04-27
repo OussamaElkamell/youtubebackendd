@@ -11,10 +11,18 @@ const { assignRandomProxy } = require('./proxy.service');
 
 
 const redisClient = new Redis(process.env.REDIS_URL, {
-
-  connectTimeout: 50000, // Set a connection timeout for the Redis client
-  retryStrategy: (times) => Math.min(times * 100, 3000), // Exponential backoff for retries
-  maxRetriesPerRequest: null, // Explicitly set maxRetriesPerRequest to null to avoid the error
+  tls:false,
+  connectTimeout: 30000, // Increase timeout to 30 seconds
+  maxRetriesPerRequest: null, // Increase retry attempts
+  retryStrategy: (times) => {
+    const delay = Math.min(times * 1000, 5000); // Max 5 second delay
+    return delay;
+  },
+  reconnectOnError: (err) => {
+    // Reconnect on these errors
+    const targetErrors = [/ETIMEDOUT/, /ECONNREFUSED/, /ENOTFOUND/];
+    return targetErrors.some(pattern => pattern.test(err.message));
+  }
 });
 // BullMQ queues with optimized settings
 const commentQueue = new Queue('comment-posting', { 
@@ -43,18 +51,37 @@ function calculateOptimizedDelay(delays) {
   ) * 1000;
 }
 
-// Redis initialization with better error handling
+
 async function initRedis() {
   try {
-    // Test the connection by sending a PING command
+
     const pong = await redisClient.ping();
-    console.log('Redis client connected successfully:', pong); // Should log "PONG"
+    console.log('Redis client connected successfully:', pong); 
     return true;
   } catch (error) {
     console.error('Failed to connect to Redis:', error);
     return false;
   }
 }
+redisClient.on('connect', () => {
+  console.log('Redis client is connecting...');
+});
+
+redisClient.on('ready', () => {
+  console.log('Redis client is ready');
+});
+
+redisClient.on('error', (err) => {
+  console.error('Redis error:', err);
+});
+
+redisClient.on('close', () => {
+  console.log('Redis connection closed');
+});
+
+redisClient.on('reconnecting', () => {
+  console.log('Redis client is reconnecting...');
+});
 // Optimized scheduler setup
 async function setupScheduler() {
   try {
