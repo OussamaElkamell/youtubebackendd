@@ -10,32 +10,20 @@ const { postComment } = require('./youtube.service');
 const { assignRandomProxy } = require('./proxy.service');
 
 
-let redisClient;
+const redisClient = new Redis(process.env.REDIS_URL, {
 
+  connectTimeout: 50000, // Set a connection timeout for the Redis client
+  retryStrategy: (times) => Math.min(times * 100, 3000), // Exponential backoff for retries
+  maxRetriesPerRequest: null, // Explicitly set maxRetriesPerRequest to null to avoid the error
+});
 // BullMQ queues with optimized settings
 const commentQueue = new Queue('comment-posting', { 
-  connection: new Redis(process.env.REDIS_URL, {
-    tls: false, // Change to true if you're using TLS
-    lazyConnect: true,
-    keepAlive: 1000,
-  }),
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: {
-      type: 'exponential',
-      delay: 3000,
-    },
-    removeOnComplete: true,
-    removeOnFail: 1000,
-  },
+  connection: redisClient,
 });
 
 // For schedule processing queue
 const scheduleQueue = new Queue('schedule-processing', {
-  connection: new Redis(process.env.REDIS_URL, {
-    tls: false, // Change to true if you're using TLS
-    connectTimeout: 10000
-  }),
+  connection: redisClient,
 });
 // Active jobs tracker
 const activeJobs = new Map();
@@ -58,24 +46,13 @@ function calculateOptimizedDelay(delays) {
 // Redis initialization with better error handling
 async function initRedis() {
   try {
-    // Initialize the ioredis client with the URL
-    const redisClient = new Redis(process.env.REDIS_URL, {
-      tls: false // Enable TLS if required
-    });
-
-    // Handle any connection errors
-    redisClient.on('error', (err) => {
-      console.error('Redis Client Error:', err);
-    });
-
     // Test the connection by sending a PING command
     const pong = await redisClient.ping();
     console.log('Redis client connected successfully:', pong); // Should log "PONG"
-    
-    return true;  // Return true if connected successfully
+    return true;
   } catch (error) {
     console.error('Failed to connect to Redis:', error);
-    return false;  // Return false if there's an error
+    return false;
   }
 }
 // Optimized scheduler setup
@@ -196,17 +173,8 @@ function setupWorkers() {
       throw error;
     }
   }, {
-    connection: new Redis(process.env.REDIS_URL, {
-      tls: false,  // Change to true if you're using TLS
-      lazyConnect: true,
-      keepAlive: 1000,
-      connectTimeout: 10000
-    }),
-    concurrency: 30,
-    limiter: {
-      max: 100,
-      duration: 1000,
-    },
+    connection: redisClient,
+    
   });
 
 
@@ -304,17 +272,8 @@ await handleQuotaExceeded(comment.youtubeAccount.google.profileId);
     }
   }
   , {
-    connection: new Redis(process.env.REDIS_URL, {
-      tls: false,  // Change to true if you're using TLS
-      lazyConnect: true,
-      keepAlive: 1000,
-      connectTimeout: 10000
-    }),
-    concurrency: 30,
-    limiter: {
-      max: 100,
-      duration: 1000
-    }
+    connection: redisClient,
+ 
   });
 
   const resetQuotaWorker = new Worker('resetQuotaQueue', async job => {
@@ -349,12 +308,7 @@ await handleQuotaExceeded(comment.youtubeAccount.google.profileId);
       console.error(`Error during quota reset job:`, err);
     }
   }, {
-    connection: new Redis(process.env.REDIS_URL, {
-      tls: false,  // Change to true if you're using TLS
-      lazyConnect: true,
-      keepAlive: 1000,
-      connectTimeout: 10000
-    }),
+    connection: redisClient,
   });
   
 
@@ -385,12 +339,7 @@ await handleQuotaExceeded(comment.youtubeAccount.google.profileId);
 
 async function scheduleQuotaReset() {
   const resetQuotaQueue = new Queue('resetQuotaQueue', {
-    connection: new Redis(process.env.REDIS_URL, {
-      tls: false,  // Change to true if you're using TLS
-      lazyConnect: true,
-      keepAlive: 1000,
-      connectTimeout: 10000
-    }),
+    connection: redisClient,
   });
 
   // Schedule the reset to run daily at midnight PT (08:00 UTC)
@@ -696,21 +645,11 @@ function setupImmediateCommentsProcessor() {
 // Queue monitoring
 function setupQueueMonitoring() {
   const scheduleQueueEvents = new QueueEvents('schedule-processing', {
-    connection: new Redis(process.env.REDIS_URL, {
-      tls: false,  // Change to true if you're using TLS
-      lazyConnect: true,
-      keepAlive: 1000,
-      connectTimeout: 10000
-    }),
+    connection: redisClient,
   });
   
   const commentQueueEvents = new QueueEvents('comment-posting', {
-    connection: new Redis(process.env.REDIS_URL, {
-      tls: false,  // Change to true if you're using TLS
-      lazyConnect: true,
-      keepAlive: 1000,
-      connectTimeout: 10000
-    }),
+    connection: redisClient,
   });
   
   scheduleQueueEvents.on('stalled', ({ jobId }) => {
