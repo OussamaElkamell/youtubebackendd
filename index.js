@@ -33,7 +33,6 @@ mongoose.connect(process.env.MONGODB_URI, {
   console.error('MongoDB connection error:', err);
   process.exit(1);
 });
-
 // Configure middleware
 app.use(helmet());
 app.use(cors({
@@ -52,7 +51,6 @@ const apiLimiter = rateLimit({
   legacyHeaders: false
 });
 app.use('/api', apiLimiter);
-
 // Setup Passport.js for Google OAuth
 setupPassport();
 app.use(passport.initialize());
