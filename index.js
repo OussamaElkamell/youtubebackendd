@@ -51,7 +51,7 @@ const apiLimiter = rateLimit({
   legacyHeaders: false
 });
 app.use('/api', apiLimiter);
-// Setup Passport.js for Google OAuth
+
 setupPassport();
 app.use(passport.initialize());
 
