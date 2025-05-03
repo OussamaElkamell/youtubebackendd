@@ -167,7 +167,7 @@ async function postComment(commentId) {
     if (!sanitizedContent) {
       throw new Error("Comment content is empty after trimming");
     }
-
+    
     const commentData = {
       snippet: {
         videoId: comment.videoId,
@@ -186,7 +186,7 @@ async function postComment(commentId) {
     } else {
       console.log("Posting a top-level comment to videoId:", comment.videoId);
     }
-
+if (agent){
     // Post the comment using YouTube API
     const response = await youtube.commentThreads.insert({
       part: "snippet",
@@ -196,7 +196,7 @@ async function postComment(commentId) {
     // Update comment with ID from YouTube
     const commentThread = response.data;
     const youtubeCommentId = commentThread.id;
-
+  
     await updateDailyUsage(account._id, "commentCount");
 
  
@@ -204,7 +204,12 @@ async function postComment(commentId) {
       success: true,
       commentId: youtubeCommentId,
       message: "Comment posted successfully",
-    };
+    };}else {
+      return {
+        success: false,
+        message: "invalid proxy",
+      }
+    }
   } catch (error) {
   
 

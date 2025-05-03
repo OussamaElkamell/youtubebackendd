@@ -529,7 +529,7 @@ async function optimizedAccountProcessing(schedule, targetVideos) {
   }
 
   await Promise.all([
-    assignProxiesToAccounts(accounts, schedule.user),
+    // assignProxiesToAccounts(accounts, schedule.user),
     processCommentsForAccounts(accounts, targetVideos, schedule)
   ]);
 }
