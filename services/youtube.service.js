@@ -208,6 +208,7 @@ if (agent){
       return {
         success: false,
         message: "invalid proxy",
+        error:"invalid proxy" 
       }
     }
   } catch (error) {
