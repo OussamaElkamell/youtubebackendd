@@ -199,16 +199,19 @@ const refreshToken = async (req, res, next) => {
 
 const getQuota = async (req, res) => {
   try {
-    // Fetch all API profiles
     const profiles = await ApiProfile.find({});
     if (!profiles || profiles.length === 0) {
       return res.status(404).json({ message: 'No profiles found' });
     }
 
-    // Sum up the usedQuota from all profiles
     const usedQuota = profiles.reduce((sum, profile) => sum + (profile.usedQuota || 0), 0);
+    
+    // Sum each profile's individual quota limit (fallback to 10_000 if missing)
+    const totalQuota = profiles.reduce(
+      (sum, profile) => sum + (profile.limitQuota || 10_000),
+      0
+    );
 
-    const totalQuota = 10_000 * profiles.length; // Assuming each profile gets 10k quota
     const remainingQuota = totalQuota - usedQuota;
 
     return res.json({
@@ -228,6 +231,7 @@ const getQuota = async (req, res) => {
     });
   }
 };
+
 
 
 
@@ -428,6 +432,7 @@ module.exports = {
   updateAccount,
   deleteAccount,
   refreshToken,
+  getActiveProfile,
   verifyAccount,
   addAccount,
   getQuota

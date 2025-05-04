@@ -43,7 +43,7 @@ exports.getProfileById = async (req, res) => {
 };
 
 exports.createProfile = async (req, res) => {
-  const { name, clientId, clientSecret, apiKey, redirectUri, isActive } = req.body;
+  const { name, clientId, clientSecret, apiKey, redirectUri, isActive,limitQuota } = req.body;
 
   try {
     // If setting as active, deactivate all others first
@@ -57,7 +57,8 @@ exports.createProfile = async (req, res) => {
       clientSecret,
       apiKey,
       redirectUri: redirectUri || 'http://localhost:4000/accounts',
-      isActive: Boolean(isActive)
+      isActive: Boolean(isActive),
+      limitQuota
     });
 
     const profile = await newProfile.save();
@@ -69,7 +70,7 @@ exports.createProfile = async (req, res) => {
 };
 
 exports.updateProfile = async (req, res) => {
-  const { name, clientId, clientSecret, apiKey, redirectUri, isActive } = req.body;
+  const { name, clientId, clientSecret, apiKey, redirectUri, isActive ,limitQuota } = req.body;
 
   try {
     let profile = await ApiProfile.findById(req.params.id);
@@ -93,6 +94,7 @@ exports.updateProfile = async (req, res) => {
     profile.apiKey = apiKey || profile.apiKey;
     profile.redirectUri = redirectUri || profile.redirectUri;
     profile.isActive = typeof isActive !== 'undefined' ? isActive : profile.isActive;
+    profile.limitQuota=limitQuota
 
     await profile.save();
     res.json(profile);

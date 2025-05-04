@@ -327,46 +327,6 @@ await handleQuotaExceeded(comment.youtubeAccount.google.profileId);
     }
   });
 
-  const resetQuotaWorker = new Worker('resetQuotaQueue', async job => {
-    try {
-      // Find all profiles that used quota or are marked as "exceeded"
-      const profiles = await ApiProfile.find({
-        $or: [
-          { usedQuota: { $gt: 0 } },
-          { status: "exceeded" }
-        ]
-      });
-  
-      for (const profile of profiles) {
-        console.log(`Resetting quota for profile: ${profile.name}`);
-  
-        // Reset profile
-        await ApiProfile.findByIdAndUpdate(profile._id, {
-          usedQuota: 0,
-          status: "not exceeded",
-          exceededAt: null
-        });
-  
-        // Activate related YouTube accounts
-        const updatedAccounts = await YouTubeAccountModel.updateMany(
-          { 'google.profileId': profile._id },
-          { $set: { status: 'active' } }
-        );
-  
-        console.log(`Updated ${updatedAccounts.modifiedCount} YouTube accounts for profile ${profile.name}`);
-      }
-    } catch (err) {
-      console.error(`Error during quota reset job:`, err);
-    }
-  }, {
-    connection: {
-      host: process.env.REDIS_HOST || 'localhost',
-      port: process.env.REDIS_PORT || 6379,
-      username: 'default',
-      password: process.env.REDIS_PASSWORD,
-      tls: {}
-    }
-  });
   
 
   // Worker event handlers
@@ -385,43 +345,32 @@ await handleQuotaExceeded(comment.youtubeAccount.google.profileId);
   commentWorker.on('failed', (job, error) => {
     console.error(`Comment job ${job.id} failed:`, error);
   });
-  resetQuotaWorker.on('completed', (job, result) => {
-    console.log(`ResetQuota job ${job.id} completed`, result);
-  });
-  
-  resetQuotaWorker.on('failed', (job, error) => {
-    console.error(`ResetQuota job ${job.id} failed:`, error);
-  });
 }
 
-async function scheduleQuotaReset() {
-  const resetQuotaQueue = new Queue('resetQuotaQueue', {
-    connection: {
-      host: process.env.REDIS_HOST || 'localhost',
-      port: process.env.REDIS_PORT || 6379,
-      username: 'default',
-      password: process.env.REDIS_PASSWORD, // Optional, only if password is set
-      tls: {}, // Optional, if you use Redis with TLS/SSL
-    },
+function scheduleQuotaReset() {
+  // Daily at 08:00 UTC (Midnight PT)
+  cron.schedule('0 8 * * *', async () => {
+    try {
+      const updatedYT = await YouTubeAccountModel.updateMany(
+        {},
+        { $set: { status: 'active' } }
+      );
+
+      const updatedAPI = await ApiProfile.updateMany(
+        {},
+        { $set: { usedQuota: 0, status: 'not exceeded', exceededAt: null } }
+      );
+
+      console.log(`Quota reset complete: ${updatedYT.modifiedCount} YouTube accounts and ${updatedAPI.modifiedCount} API profiles updated.`);
+    } catch (error) {
+      console.error('Error during daily quota reset:', error);
+    }
+  }, {
+    timezone: 'America/Los_Angeles' // Or 'America/Los_Angeles' if you want local PT time instead
   });
 
-  // Schedule the reset to run daily at midnight PT (08:00 UTC)
-  await resetQuotaQueue.add('dailyReset', {}, {
-    repeat: {
-      cron: '0 8 * * *', // 08:00 UTC = Midnight PT
-      tz: 'America/Los_Angeles',
-    },
-    removeOnComplete: true,
-    removeOnFail: { count: 3 },
-  });
-
-  console.log('Quota reset scheduled successfully.');
+  console.log('Daily quota reset cron job scheduled.');
 }
-
-// Call the function to schedule the job
-scheduleQuotaReset().catch((err) => {
-  console.error('Error scheduling quota reset:', err);
-});
 async function handleQuotaExceeded(profileId) {
   try {
     // Mark the profile as exceeded (only if not already)
@@ -431,7 +380,7 @@ async function handleQuotaExceeded(profileId) {
         $set: {
           status: 'exceeded',
           exceededAt: new Date(),
-          usedQuota: 10000
+       
         }
       }
     );
@@ -846,5 +795,6 @@ module.exports = {
   setupScheduleJob,
   processSchedule: optimizedProcessSchedule,
   cleanSchedulerData,
+  scheduleQuotaReset,
   shutdown
 };
