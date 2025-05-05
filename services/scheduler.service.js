@@ -51,24 +51,18 @@ const scheduleQueue = new Queue('schedule-processing', {
 const activeJobs = new Map();
 
 // Optimized delay calculation
-function calculateOptimizedDelay(delays, index = 0) {
+function calculateOptimizedDelay(delays) {
   if (!delays || typeof delays.minDelay !== 'number' || typeof delays.maxDelay !== 'number') {
     return 1000; // Default 1 second delay
   }
 
   const max = Math.min(delays.maxDelay, 30);
   const min = Math.max(delays.minDelay, 1);
-
-  // Logarithmic distributioncreated
-  const randomDelay = Math.floor(
+  
+  // Logarithmic distribution for more short delays
+  return Math.floor(
     Math.pow(10, Math.random() * Math.log10(max - min + 1)) + min - 1
   ) * 1000;
-
-  const betweenAccounts = typeof delays.betweenAccounts === 'number'
-    ? delays.betweenAccounts * 1000 * index
-    : 0;
-
-  return randomDelay + betweenAccounts;
 }
 
 // Redis initialization with better error handling
@@ -534,16 +528,15 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     
   ]);
 
-  const jobs = createdComments.map((comment, index) => ({
+  const jobs = createdComments.map(comment => ({
     name: 'post-comment',
-    data: { commentId: comment._id, scheduleId: schedule._id },
+    data: { commentId: comment._id , scheduleId: schedule._id  },
     opts: {
-      delay: calculateOptimizedDelay(schedule.delays, index),
+      delay: calculateOptimizedDelay(schedule.delays),
       attempts: 3,
       backoff: { type: 'exponential', delay: 3000 }
     }
   }));
-  
 
   await commentQueue.addBulk(jobs);
 }
