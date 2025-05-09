@@ -12,6 +12,11 @@ const CommentSchema = new mongoose.Schema({
     ref: 'YouTubeAccount',
     required: true
   },
+  scheduleId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Schedule',
+    required: true
+  },
   videoId: {
     type: String,
     required: true

@@ -23,7 +23,7 @@ const YouTubeAccountSchema = new mongoose.Schema({
   proxy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Proxy',
-    default: null
+    default:null
   },
   lastUsed: Date,
   dailyUsage: {
@@ -69,7 +69,7 @@ const YouTubeAccountSchema = new mongoose.Schema({
       required: true
     }
   },
-  lastMessage:String,
+  lastMessage: String,
   createdAt: {
     type: Date,
     default: Date.now
@@ -77,10 +77,18 @@ const YouTubeAccountSchema = new mongoose.Schema({
   connectedDate: {
     type: Date,
     default: Date.now
+  },
+  proxyErrorCount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  proxyErrorThreshold: {
+    type: Number,
+    default: 3
   }
 }, {
   timestamps: true, // Adds createdAt and updatedAt automatically
-
 });
 
 // Method to check if token needs refresh
@@ -141,6 +149,12 @@ YouTubeAccountSchema.pre('save', function(next) {
       likeCount: 0
     };
   }
+  
+  // If proxyErrorCount exceeds threshold, set status to inactive
+  if (this.proxyErrorCount >= this.proxyErrorThreshold) {
+    this.status = 'inactive';
+  }
+
   next();
 });
 

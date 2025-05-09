@@ -221,11 +221,14 @@ function setupWorkers() {
 
   // Comment worker
   const commentWorker = new Worker('comment-posting', async (job) => {
-    const { commentId,scheduleId } = job.data;
+    const { commentId } = job.data;
+    console.log("job.data", job.data);
   
     try {
       const comment = await getCommentWithRetry(commentId);
       if (!comment) throw new Error(`Comment ${commentId} not found`);
+  
+      const scheduleId = comment.scheduleId.toString() || job.data.scheduleId;
   
       if (!comment.youtubeAccount || comment.youtubeAccount.status !== 'active') {
         await CommentModel.updateOne(
@@ -233,99 +236,97 @@ function setupWorkers() {
           { status: 'failed', errorMessage: 'Invalid or inactive account' }
         );
   
-          // Update the schedule's progress for failed comments
-          await ScheduleModel.updateOne(
-            { _id: scheduleId }, // Use the passed scheduleId
-            { $inc: { 'progress.failedComments': 1 } }
-          );
+        await ScheduleModel.updateOne(
+          { _id: comment.scheduleId },
+          { $inc: { 'progress.failedComments': 1 } }
+        );
   
         return { success: false, message: 'Invalid or inactive account' };
       }
-  
+      
+ 
       const result = await postComment(commentId);
- 
- 
+      console.log("reesssssssssult", result);
+  
       const quotaExceeded =
-      result.error?.includes("quota") ||
-      result.error?.includes("dailyLimitExceeded")
-      // Update the schedule's progress based on the result
+        result.error?.includes("quota") ||
+        result.error?.includes("dailyLimitExceeded");
+  
+      const proxyError =
+        result.error?.includes("proxy") ||
+        result.error?.includes("invalid proxy") ||
+        result.error === "invalid proxy";
+  
+      console.log("proxxxxxxxxxxxy", proxyError);
+  
       const updateProgress = result.success
         ? { $inc: { 'progress.postedComments': 1 } }
         : { $inc: { 'progress.failedComments': 1 } };
-      
-      await ScheduleModel.updateOne(
-        { _id: scheduleId }, // Use the passed scheduleId
-        updateProgress
-      );
-      
-      // Save the result to the YouTube account
+  
+      await ScheduleModel.updateOne({ _id: scheduleId }, updateProgress);
+  
+      // Initialize updateFields
+      let updateFields = {
+        lastMessage: result.success
+          ? 'Comment posted successfully'
+          : result.error || 'Unknown error',
+      };
+  
+      if (result.success) {
+        updateFields.status = 'active';
+        updateFields.proxyErrorCount = 0; // Reset on success
+      } else if (proxyError) {
+        const currentAccount = await YouTubeAccountModel.findById(comment.youtubeAccount._id);
+        const currentCount = currentAccount?.proxyErrorCount || 0;
+        const newCount = currentCount + 1;
+  
+        updateFields.proxyErrorCount = newCount;
+        updateFields.status = newCount >= 3 ? 'inactive' : 'active';
+      } else {
+        // For any other errors, mark the account as inactive immediately
+        updateFields.proxyErrorCount = 0; // Reset count on other error
+        updateFields.status = 'inactive';
+      }
+  
       if (comment.youtubeAccount._id) {
         await YouTubeAccountModel.updateOne(
           { _id: comment.youtubeAccount._id },
-          {
-            $set: {
-              lastMessage: result.success
-                ? 'Comment posted successfully'
-                : result.error || 'Unknown error', // Save the success or error message
-              status: result.success ? 'active' : 'inactive', // Update status based on success/failure
-            },
-          }
+          { $set: updateFields }
         );
       }
-      if(quotaExceeded){
-        console.log("yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyeeeeeeeeeeeeeessssssssssss");
-        
-      }else{
-        console.log ("nooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo");
-       
+  
+      if (quotaExceeded) {
+        await handleQuotaExceeded(comment.youtubeAccount.google.profileId);
       }
-
+  
       if (result.success) {
-        console.log('Iddddddddd',comment.youtubeAccount.google.profileId);
-        
         await updateProfileQuota(comment.youtubeAccount._id);
-      }else if (quotaExceeded) {
-await handleQuotaExceeded(comment.youtubeAccount.google.profileId);
-}        
-      // Mark account as inactive on failure
-      if (!result.success && comment.youtubeAccount._id) {
-        await YouTubeAccountModel.updateOne(
-          { _id: comment.youtubeAccount._id },
-          { status: 'inactive' } // Ensure account is inactive on failure
-        );
       }
-       
-    
-      await Promise.all([
-   
-        updateCommentStatus(commentId, result)
-      ]);
-      
+  
+      await updateCommentStatus(commentId, result);
+  
       return result;
-      
+  
     } catch (error) {
       console.error(`Error processing comment ${commentId}:`, error);
       await handleCommentError(commentId, error);
-  
-     
-  
       throw error;
     }
-  }
-  , {
-    connection: { 
+  }, {
+    connection: {
       host: process.env.REDIS_HOST || 'localhost',
       port: process.env.REDIS_PORT || 6379,
       username: 'default',
       password: process.env.REDIS_PASSWORD,
-      tls:{}
+      tls: {}
     },
     concurrency: 30,
     limiter: {
       max: 100,
-      duration: 1000
+      duration: 30000
     }
   });
+  
 
   
 
@@ -360,8 +361,11 @@ function scheduleQuotaReset() {
         {},
         { $set: { usedQuota: 0, status: 'not exceeded', exceededAt: null } }
       );
-
-      console.log(`Quota reset complete: ${updatedYT.modifiedCount} YouTube accounts and ${updatedAPI.modifiedCount} API profiles updated.`);
+      const updatedSchedules = await ScheduleModel.updateMany(
+        {},
+        { $set: { status: 'active' } }
+      );
+      console.log(`Quota reset complete: ${updatedYT.modifiedCount} YouTube accounts, ${updatedAPI.modifiedCount} API profiles, and ${updatedSchedules.modifiedCount} schedules updated.`);
     } catch (error) {
       console.error('Error during daily quota reset:', error);
     }
@@ -504,17 +508,19 @@ async function assignProxiesToAccounts(accounts, userId) {
 }
 
 async function processCommentsForAccounts(accounts, targetVideos, schedule) {
-  const comments = accounts.flatMap(account => 
+  const comments = accounts.flatMap(account =>
     targetVideos.map(video => ({
       user: schedule.user,
       youtubeAccount: account._id,
       videoId: video.videoId,
+      scheduleId: schedule._id,
       content: getRandomTemplate(schedule.commentTemplates),
       status: 'pending',
       metadata: { scheduleId: schedule._id }
-    })
-  ));
+    }))
+  );
 
+  // Insert comments and update account usage
   const [createdComments] = await Promise.all([
     CommentModel.insertMany(comments),
     YouTubeAccountModel.updateMany(
@@ -525,21 +531,41 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
       { _id: schedule._id },
       { $inc: { 'progress.totalComments': comments.length } }
     )
-    
   ]);
 
-  const jobs = createdComments.map(comment => ({
-    name: 'post-comment',
-    data: { commentId: comment._id , scheduleId: schedule._id  },
-    opts: {
-      delay: calculateOptimizedDelay(schedule.delays),
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 3000 }
-    }
-  }));
+  const delayBetweenComments = 30000;
 
+  // Create jobs with proper delays
+  const jobs = createdComments.map((comment, index) => {
+    const delay = index * delayBetweenComments;
+    console.log(`Job for comment ${comment._id} will be delayed by ${delay}ms`);
+
+    return {
+      name: 'post-comment',
+      data: { commentId: comment._id, scheduleId: schedule._id },
+      opts: {
+        delay: delay,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 3000 }
+      }
+    };
+  });
+
+  // Log total comments and delay info
+  console.log(`Queuing ${jobs.length} comments with a delay of ${delayBetweenComments}ms between each.`);
+
+  // Add jobs to the queue
   await commentQueue.addBulk(jobs);
+
+  // Optionally log all the jobs in the queue
+  console.log("All queued jobs:", jobs.map(job => ({
+    commentId: job.data.commentId,
+    delay: job.opts.delay,
+    attempts: job.opts.attempts
+  })));
 }
+
+
 
 // Helper functions
 function getRandomTemplate(templates) {
