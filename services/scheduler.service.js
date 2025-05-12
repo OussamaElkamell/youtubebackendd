@@ -228,7 +228,7 @@ function setupWorkers() {
       const comment = await getCommentWithRetry(commentId);
       if (!comment) throw new Error(`Comment ${commentId} not found`);
   
-      const scheduleId = comment.scheduleId.toString() || job.data.scheduleId;
+      const scheduleId = comment.scheduleId?.toString() || job.data.scheduleId;
   
       if (!comment.youtubeAccount || comment.youtubeAccount.status !== 'active') {
         await CommentModel.updateOne(
@@ -323,7 +323,7 @@ function setupWorkers() {
     concurrency: 30,
     limiter: {
       max: 100,
-      duration: 30000
+      duration: 1000
     }
   });
   
@@ -536,20 +536,15 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
   const delayBetweenComments = 30000;
 
   // Create jobs with proper delays
-  const jobs = createdComments.map((comment, index) => {
-    const delay = index * delayBetweenComments;
-    console.log(`Job for comment ${comment._id} will be delayed by ${delay}ms`);
-
-    return {
-      name: 'post-comment',
-      data: { commentId: comment._id, scheduleId: schedule._id },
-      opts: {
-        delay: delay,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 3000 }
-      }
-    };
-  });
+  const jobs = createdComments.map(comment => ({
+    name: 'post-comment',
+    data: { commentId: comment._id , scheduleId: schedule._id  },
+    opts: {
+      delay: calculateOptimizedDelay(schedule.delays),
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 3000 }
+    }
+  }));
 
   // Log total comments and delay info
   console.log(`Queuing ${jobs.length} comments with a delay of ${delayBetweenComments}ms between each.`);
@@ -655,6 +650,7 @@ function setupImmediateCommentsProcessor() {
         status: 'pending',
         scheduledFor: null
       }).populate('youtubeAccount').limit(50); // Increased limit
+      console.log('helllllllo imediate');
       
       await Promise.all(pendingComments.map(async (comment) => {
         if (!comment.youtubeAccount || comment.youtubeAccount.status !== 'active') {
