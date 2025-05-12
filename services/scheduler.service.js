@@ -221,14 +221,14 @@ function setupWorkers() {
 
   // Comment worker
   const commentWorker = new Worker('comment-posting', async (job) => {
-    const { commentId } = job.data;
+    const { commentId,scheduleId } = job.data;
     console.log("job.data", job.data);
   
     try {
       const comment = await getCommentWithRetry(commentId);
       if (!comment) throw new Error(`Comment ${commentId} not found`);
   
-      const scheduleId = job.data.scheduleId||comment.scheduleId?.toString()  ;
+      
   
       if (!comment.youtubeAccount || comment.youtubeAccount.status !== 'active') {
         await CommentModel.updateOne(
