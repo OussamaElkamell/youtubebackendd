@@ -228,7 +228,7 @@ function setupWorkers() {
       const comment = await getCommentWithRetry(commentId);
       if (!comment) throw new Error(`Comment ${commentId} not found`);
   
-      const scheduleId = comment.scheduleId?.toString() || job.data.scheduleId;
+      const scheduleId = job.data.scheduleId||comment.scheduleId?.toString()  ;
   
       if (!comment.youtubeAccount || comment.youtubeAccount.status !== 'active') {
         await CommentModel.updateOne(
