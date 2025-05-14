@@ -508,19 +508,22 @@ async function assignProxiesToAccounts(accounts, userId) {
 }
 
 async function processCommentsForAccounts(accounts, targetVideos, schedule) {
-  const comments = accounts.flatMap(account =>
-    targetVideos.map(video => ({
+  const comments = accounts.map(account => {
+    // Select a random video for this account
+    const randomVideo = targetVideos[Math.floor(Math.random() * targetVideos.length)];
+    
+    return {
       user: schedule.user,
       youtubeAccount: account._id,
-      videoId: video.videoId,
+      videoId: randomVideo.videoId,
       scheduleId: schedule._id,
       content: getRandomTemplate(schedule.commentTemplates),
       status: 'pending',
       metadata: { scheduleId: schedule._id }
-    }))
-  );
+    };
+  });
 
-  // Insert comments and update account usage
+  // Rest of the function remains the same...
   const [createdComments] = await Promise.all([
     CommentModel.insertMany(comments),
     YouTubeAccountModel.updateMany(
@@ -533,12 +536,9 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     )
   ]);
 
-  const delayBetweenComments = 30000;
-
-  // Create jobs with proper delays
   const jobs = createdComments.map(comment => ({
     name: 'post-comment',
-    data: { commentId: comment._id , scheduleId: schedule._id  },
+    data: { commentId: comment._id, scheduleId: schedule._id },
     opts: {
       delay: calculateOptimizedDelay(schedule.delays),
       attempts: 3,
@@ -546,20 +546,9 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     }
   }));
 
-  // Log total comments and delay info
-  console.log(`Queuing ${jobs.length} comments with a delay of ${delayBetweenComments}ms between each.`);
-
-  // Add jobs to the queue
+  console.log(`Queuing ${jobs.length} comments with random video selection`);
   await commentQueue.addBulk(jobs);
-
-  // Optionally log all the jobs in the queue
-  console.log("All queued jobs:", jobs.map(job => ({
-    commentId: job.data.commentId,
-    delay: job.opts.delay,
-    attempts: job.opts.attempts
-  })));
 }
-
 
 
 // Helper functions
