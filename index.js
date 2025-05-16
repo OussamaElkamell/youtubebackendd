@@ -16,7 +16,7 @@ const schedulerRoutes = require('./routes/scheduler.routes');
 const apiProfilesRoutes = require('./routes/apiProfiles.routes');
 require('./cron/resetQuota');
 // Import services
-const { setupScheduler, shutdown, scheduleQuotaReset } = require('./services/scheduler.service');
+const { setupScheduler, shutdown, scheduleQuotaReset, scheduleFrequentStatusReset } = require('./services/scheduler.service');
 const { setupPassport } = require('./config/passport.config');
 
 // Initialize express app
@@ -85,6 +85,7 @@ const server = app.listen(PORT, () => {
   // Initialize the comment scheduler
   setupScheduler();
   scheduleQuotaReset();
+  // scheduleFrequentStatusReset()
 });
 
 // Handle graceful shutdown

@@ -349,8 +349,8 @@ function setupWorkers() {
 }
 
 function scheduleQuotaReset() {
-  // Daily at 08:00 UTC (Midnight PT)
-  cron.schedule('0 8 * * *', async () => {
+ 
+  cron.schedule('0 0 * * *', async () => {
     try {
       const updatedYT = await YouTubeAccountModel.updateMany(
         {},
@@ -361,19 +361,49 @@ function scheduleQuotaReset() {
         {},
         { $set: { usedQuota: 0, status: 'not exceeded', exceededAt: null } }
       );
+
       const updatedSchedules = await ScheduleModel.updateMany(
         {},
         { $set: { status: 'active' } }
       );
-      console.log(`Quota reset complete: ${updatedYT.modifiedCount} YouTube accounts, ${updatedAPI.modifiedCount} API profiles, and ${updatedSchedules.modifiedCount} schedules updated.`);
+
+      console.log(
+        `Quota reset complete at ${new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })}: ` +
+        `${updatedYT.modifiedCount} YT accounts, ` +
+        `${updatedAPI.modifiedCount} API profiles, ` +
+        `and ${updatedSchedules.modifiedCount} schedules updated.`
+      );
     } catch (error) {
       console.error('Error during daily quota reset:', error);
     }
   }, {
-    timezone: 'America/Los_Angeles' // Or 'America/Los_Angeles' if you want local PT time instead
+    timezone: 'America/Los_Angeles'
   });
 
-  console.log('Daily quota reset cron job scheduled.');
+  console.log('Daily quota reset cron job scheduled for 00:00 PT.');
+}
+
+function scheduleFrequentStatusReset() {
+  // Every 15 seconds
+  cron.schedule('*/15 * * * * *', async () => {
+    try {
+      const updatedYT = await YouTubeAccountModel.updateMany(
+        {},
+        { $set: { status: 'active' } }
+      );
+
+      const updatedSchedules = await ScheduleModel.updateMany(
+        {},
+        { $set: { status: 'active' } }
+      );
+
+      console.log(`[${new Date().toISOString()}] Frequent reset: ${updatedYT.modifiedCount} YouTube accounts, ${updatedSchedules.modifiedCount} schedules updated.`);
+    } catch (error) {
+      console.error('Error during frequent status reset:', error);
+    }
+  }, {
+    timezone: 'America/Los_Angeles'
+  });
 }
 async function handleQuotaExceeded(profileId) {
   try {
@@ -807,5 +837,6 @@ module.exports = {
   processSchedule: optimizedProcessSchedule,
   cleanSchedulerData,
   scheduleQuotaReset,
+  scheduleFrequentStatusReset,
   shutdown
 };
