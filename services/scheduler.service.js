@@ -170,27 +170,34 @@ async function setupScheduleJob(scheduleId) {
 
     const postedComments = schedule.progress?.postedComments || 0;
     const isInProgress = !!schedule.progress;
-    const commentsTrigger = postedComments % schedule.delays.limitComments === 0;
+    const commentsTrigger = schedule.delays.limitComments !== 0
+  ? postedComments % schedule.delays.limitComments === 0
+  : false;
+
     console.log('isInProgress :',isInProgress,'postedComments',postedComments,'commentsTrigger',commentsTrigger);
     const minDelay = schedule.delays.minDelay;
 const maxDelay = schedule.delays.maxDelay;
 
-  let randomDelay =0
+ 
 
-    if (isInProgress && commentsTrigger &&postedComments!==0 ) {
-    randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+    if (isInProgress && commentsTrigger && postedComments!==0 ) {
+    const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
 
       intervalMs = randomDelay * 60 * 1000 
       console.log('wait for ',intervalMs ,"minutes");
-      
-    } else {
-      intervalMs = calculateIntervalMs(schedule.schedule.interval);
-       console.log('wait for original interval : ',intervalMs ,"ms");
-    }
-     await ScheduleModel.updateOne(
+        await ScheduleModel.updateOne(
   { _id: schedule._id },
   { $set: { 'delays.delayofsleep': randomDelay } }
 );
+    } else {
+      intervalMs = calculateIntervalMs(schedule.schedule.interval);
+              await ScheduleModel.updateOne(
+  { _id: schedule._id },
+  { $set: { 'delays.delayofsleep':0 } }
+);
+       console.log('wait for original interval : ',intervalMs ,"ms");
+    }
+   
     const jobId = `recurring-${scheduleId}`;
 
     await scheduleQueue.add('process-schedule', { scheduleId }, {
