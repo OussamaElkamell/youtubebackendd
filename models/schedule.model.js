@@ -74,7 +74,16 @@ const ScheduleSchema = new mongoose.Schema({
     betweenAccounts: {
       type: Number,
       default: 0
+    },
+       limitComments: {
+      type: Number,
+      default: 0
+    },
+          delayofsleep: {
+      type: Number,
+      default: 0
     }
+    
   },
   progress: {
     totalComments: {

@@ -165,23 +165,49 @@ async function setupScheduleJob(scheduleId) {
         break;
         
       case 'interval':
-        if (schedule.schedule.interval?.value > 0) {
-          const intervalMs = calculateIntervalMs(schedule.schedule.interval);
-          const jobId = `recurring-${scheduleId}`;
-          
-          await scheduleQueue.add('process-schedule', { scheduleId }, {
-            repeat: { every: intervalMs },
-            jobId
-          });
-          
-          activeJobs.set(scheduleId, {
-            stop: async () => {
-              const jobs = await scheduleQueue.getRepeatableJobs();
-              const job = jobs.find(j => j.id === jobId);
-              if (job) await scheduleQueue.removeRepeatableByKey(job.key);
-            }
-          });
-        }
+  if (schedule.schedule.interval?.value > 0) {
+    let intervalMs;
+
+    const postedComments = schedule.progress?.postedComments || 0;
+    const isInProgress = !!schedule.progress;
+    const commentsTrigger = postedComments % schedule.delays.limitComments === 0;
+    console.log('isInProgress :',isInProgress,'postedComments',postedComments,'commentsTrigger',commentsTrigger);
+    const minDelay = schedule.delays.minDelay;
+const maxDelay = schedule.delays.maxDelay;
+
+  let randomDelay =0
+
+    if (isInProgress && commentsTrigger &&postedComments!==0 ) {
+    randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+
+      intervalMs = randomDelay * 60 * 1000 
+      console.log('wait for ',intervalMs ,"minutes");
+      
+    } else {
+      intervalMs = calculateIntervalMs(schedule.schedule.interval);
+       console.log('wait for original interval : ',intervalMs ,"ms");
+    }
+     await ScheduleModel.updateOne(
+  { _id: schedule._id },
+  { $set: { 'delays.delayofsleep': randomDelay } }
+);
+    const jobId = `recurring-${scheduleId}`;
+
+    await scheduleQueue.add('process-schedule', { scheduleId }, {
+      repeat: { every: intervalMs },
+      jobId
+    });
+
+    activeJobs.set(scheduleId, {
+      stop: async () => {
+        const jobs = await scheduleQueue.getRepeatableJobs();
+        const job = jobs.find(j => j.id === jobId);
+        if (job) await scheduleQueue.removeRepeatableByKey(job.key);
+      }
+    });
+  }
+  
+
         break;
     }
     
