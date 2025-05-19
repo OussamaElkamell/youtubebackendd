@@ -308,6 +308,7 @@ function setupWorkers() {
       if (result.success) {
         updateFields.status = 'active';
         updateFields.proxyErrorCount = 0; // Reset on success
+        setupScheduleJob()
       } else if (proxyError) {
         const currentAccount = await YouTubeAccountModel.findById(comment.youtubeAccount._id);
         const currentCount = currentAccount?.proxyErrorCount || 0;
