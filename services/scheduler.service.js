@@ -138,12 +138,17 @@ async function handleIntervalSchedule(schedule, scheduleId) {
       const maxDelay = currentSchedule.delays.maxDelay || 30;
       const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
       intervalMs = randomDelay * 60 * 1000;
-      console.log(`Applying random delay of ${randomDelay} minutes`);
+      console.log(`[Schedule ${scheduleId}] Applying random delay of ${randomDelay} minutes`);
       
-      // Save the delay and update the job
+      // Save the delay and the start time of the delay period
       await ScheduleModel.updateOne(
         { _id: schedule._id },
-        { $set: { 'delays.delayofsleep': randomDelay } }
+        { 
+          $set: { 
+            'delays.delayofsleep': randomDelay,
+            'delays.delayStartTime': new Date()  // Save when the delay started
+          } 
+        }
       );
       
       // Remove any existing job
@@ -167,7 +172,12 @@ async function handleIntervalSchedule(schedule, scheduleId) {
     intervalMs = calculateIntervalMs(currentSchedule.schedule.interval);
     await ScheduleModel.updateOne(
       { _id: schedule._id },
-      { $set: { 'delays.delayofsleep': 0 } }
+      { 
+        $set: { 
+          'delays.delayofsleep': 0,
+          'delays.delayStartTime': null  // Clear delay start time
+        } 
+      }
     );
 
     // Manage the job
@@ -192,10 +202,11 @@ async function handleIntervalSchedule(schedule, scheduleId) {
     });
 
   } catch (error) {
-    console.error(`Error handling interval for ${scheduleId}:`, error);
+    console.error(`[Schedule ${scheduleId}] Error handling interval:`, error);
     throw error;
   }
 }
+
 
 // Optimized schedule job setup
 async function setupScheduleJob(scheduleId) {
@@ -543,20 +554,24 @@ async function optimizedProcessSchedule(scheduleId) {
     ]);
 
     // 1. First check for active delay period
-    if (schedule?.delays?.delayofsleep > 0) {
-
+    if (schedule?.delays?.delayofsleep > 0 && schedule?.delays?.delayStartTime) {
+      const delayStartTime = new Date(schedule.delays.delayStartTime);
+      const delayEndTime = new Date(delayStartTime);
+      delayEndTime.setMinutes(delayEndTime.getMinutes() + schedule.delays.delayofsleep);
       
-         const postedComments = schedule.progress?.postedComments || 0;
-    const limitComments = schedule.delays?.limitComments || 0;
-    
-    if (limitComments > 0 && postedComments % limitComments === 0 && postedComments > 0) {
-        console.log(`[Schedule ${scheduleId}] Skipping processing - active delay period (${schedule.delays.delayofsleep} minutes) `);
+      if (new Date() < delayEndTime) {
+        console.log(`[Schedule ${scheduleId}] Skipping processing - active delay period (${schedule.delays.delayofsleep} minutes) until ${delayEndTime}`);
         return false;
       } else {
         // Delay period has ended - clear it
         await ScheduleModel.updateOne(
           { _id: scheduleId },
-          { $set: { 'delays.delayofsleep': 0 } }
+          { 
+            $set: { 
+              'delays.delayofsleep': 0,
+              'delays.delayStartTime': null
+            } 
+          }
         );
         console.log(`[Schedule ${scheduleId}] Delay period ended - resuming normal processing`);
       }
@@ -627,7 +642,6 @@ async function optimizedProcessSchedule(scheduleId) {
     return false;
   }
 }
-
 // Optimized account processing
 async function optimizedAccountProcessing(schedule, targetVideos) {
   const accounts = getAccountsByStrategy(schedule);
