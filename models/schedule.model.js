@@ -82,7 +82,12 @@ const ScheduleSchema = new mongoose.Schema({
           delayofsleep: {
       type: Number,
       default: 0
-    }
+    },
+    delayStartTime: {
+      type: Date,
+      default:null
+
+    },
     
   },
   progress: {
