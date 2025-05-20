@@ -329,7 +329,11 @@ function setupWorkers() {
       if (result.success) {
         updateFields.status = 'active';
         updateFields.proxyErrorCount = 0; // Reset on success
-     
+      const schedule = await ScheduleModel.findById(scheduleId);
+  if (schedule?.schedule?.type === 'interval') {
+    await handleIntervalSchedule(schedule, scheduleId);
+  
+    }
       } else if (proxyError) {
         const currentAccount = await YouTubeAccountModel.findById(comment.youtubeAccount._id);
         const currentCount = currentAccount?.proxyErrorCount || 0;
@@ -550,9 +554,7 @@ async function optimizedProcessSchedule(scheduleId) {
       console.log(`Schedule ${scheduleId} has no valid targets or templates`);
       return false;
     }
-       if (schedule.schedule.type === 'interval') {
-      await handleIntervalSchedule(schedule, scheduleId);
-    }
+    
     await optimizedAccountProcessing(schedule, targetVideos);
 
     return true;
