@@ -404,7 +404,6 @@ function setupWorkers() {
 }
 
 function scheduleQuotaReset() {
- 
   cron.schedule('0 0 * * *', async () => {
     try {
       const updatedYT = await YouTubeAccountModel.updateMany(
@@ -422,11 +421,17 @@ function scheduleQuotaReset() {
         { $set: { status: 'active' } }
       );
 
+      // Optionally call optimizedProcessSchedule for each schedule
+      const schedules = await ScheduleModel.find({});
+      for (const schedule of schedules) {
+        await optimizedProcessSchedule(schedule._id);
+      }
+
       console.log(
         `Quota reset complete at ${new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })}: ` +
         `${updatedYT.modifiedCount} YT accounts, ` +
         `${updatedAPI.modifiedCount} API profiles, ` +
-        `and ${updatedSchedules.modifiedCount} schedules updated.`
+        `${updatedSchedules.modifiedCount} schedules updated.`
       );
     } catch (error) {
       console.error('Error during daily quota reset:', error);
@@ -437,6 +442,7 @@ function scheduleQuotaReset() {
 
   console.log('Daily quota reset cron job scheduled for 00:00 PT.');
 }
+
 
 function scheduleFrequentStatusReset() {
   // Every 15 seconds
