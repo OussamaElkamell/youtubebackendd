@@ -547,7 +547,10 @@ async function optimizedProcessSchedule(scheduleId) {
       const delayEndTime = new Date(schedule.lastProcessedAt);
       delayEndTime.setMinutes(delayEndTime.getMinutes() + schedule.delays.delayofsleep);
       
-      if (new Date() < delayEndTime) {
+         const postedComments = currentSchedule.progress?.postedComments || 0;
+    const limitComments = currentSchedule.delays?.limitComments || 0;
+    
+    if (limitComments > 0 && postedComments % limitComments === 0 && postedComments > 0) {
         console.log(`[Schedule ${scheduleId}] Skipping processing - active delay period (${schedule.delays.delayofsleep} minutes) until ${delayEndTime}`);
         return false;
       } else {
