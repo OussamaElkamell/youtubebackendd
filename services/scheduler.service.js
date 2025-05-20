@@ -536,19 +536,42 @@ async function optimizedProcessSchedule(scheduleId) {
   try {
     const [cachedSchedule, schedule] = await Promise.all([
       redisClient.get(`schedule:${scheduleId}`),
-      ScheduleModel.findById(scheduleId).populate('selectedAccounts').lean()
+      ScheduleModel.findById(scheduleId)
+        .populate('selectedAccounts')
+        .populate('user')
+        .lean()
     ]);
 
+    // 1. First check for active delay period
+    if (schedule?.delays?.delayofsleep > 0) {
+      const delayEndTime = new Date(schedule.lastProcessedAt);
+      delayEndTime.setMinutes(delayEndTime.getMinutes() + schedule.delays.delayofsleep);
+      
+      if (new Date() < delayEndTime) {
+        console.log(`[Schedule ${scheduleId}] Skipping processing - active delay period (${schedule.delays.delayofsleep} minutes) until ${delayEndTime}`);
+        return false;
+      } else {
+        // Delay period has ended - clear it
+        await ScheduleModel.updateOne(
+          { _id: scheduleId },
+          { $set: { 'delays.delayofsleep': 0 } }
+        );
+        console.log(`[Schedule ${scheduleId}] Delay period ended - resuming normal processing`);
+      }
+    }
+
+    // 2. Check cached schedule status
     if (cachedSchedule) {
       const parsed = JSON.parse(cachedSchedule);
       if (parsed.status !== 'active') {
-        console.log(`Cached schedule ${scheduleId} is not active`);
+        console.log(`[Schedule ${scheduleId}] Cached status is not active (${parsed.status})`);
         return false;
       }
     }
 
+    // 3. Validate schedule exists and is active
     if (!schedule || schedule.status !== 'active') {
-      console.log(`Schedule ${scheduleId} is no longer active`);
+      console.log(`[Schedule ${scheduleId}] Not found or not active`);
       if (schedule) {
         await redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
           id: schedule._id.toString(),
@@ -560,9 +583,10 @@ async function optimizedProcessSchedule(scheduleId) {
       return false;
     }
 
+    // 4. Check end date
     const now = new Date();
     if (schedule.schedule.endDate && new Date(schedule.schedule.endDate) < now) {
-      console.log(`Schedule ${scheduleId} has ended`);
+      console.log(`[Schedule ${scheduleId}] Schedule has ended`);
       await Promise.all([
         ScheduleModel.updateOne({ _id: scheduleId }, { status: 'completed' }),
         redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
@@ -577,18 +601,26 @@ async function optimizedProcessSchedule(scheduleId) {
       return false;
     }
 
+    // 5. Validate targets and templates
     const targetVideos = [...schedule.targetVideos];
     if ((targetVideos.length === 0 && schedule.targetChannels.length === 0) ||
         schedule.commentTemplates.length === 0) {
-      console.log(`Schedule ${scheduleId} has no valid targets or templates`);
+      console.log(`[Schedule ${scheduleId}] No valid targets or templates`);
       return false;
     }
-    
+
+    // 6. Update last processed time
+    await ScheduleModel.updateOne(
+      { _id: scheduleId },
+      { $set: { lastProcessedAt: new Date() } }
+    );
+
+    // 7. Process accounts and create comments (if not in delay period)
     await optimizedAccountProcessing(schedule, targetVideos);
 
     return true;
   } catch (error) {
-    console.error(`Error processing schedule ${scheduleId}:`, error);
+    console.error(`[Schedule ${scheduleId}] Error processing schedule:`, error);
     await handleScheduleError(scheduleId, error);
     return false;
   }
@@ -633,6 +665,12 @@ async function assignProxiesToAccounts(accounts, userId) {
 }
 
 async function processCommentsForAccounts(accounts, targetVideos, schedule) {
+  // Check if there's an active delay period
+  if (schedule.delays?.delayofsleep > 0) {
+    console.log(`[Schedule ${schedule._id}] Skipping comment creation - delay of ${schedule.delays.delayofsleep} minutes active`);
+    return;
+  }
+
   const comments = accounts.map(account => {
     // Select a random video for this account
     const randomVideo = targetVideos[Math.floor(Math.random() * targetVideos.length)];
@@ -648,7 +686,6 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     };
   });
 
-  // Rest of the function remains the same...
   const [createdComments] = await Promise.all([
     CommentModel.insertMany(comments),
     YouTubeAccountModel.updateMany(
@@ -674,7 +711,6 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
   console.log(`Queuing ${jobs.length} comments with random video selection`);
   await commentQueue.addBulk(jobs);
 }
-
 
 // Helper functions
 function getRandomTemplate(templates) {
