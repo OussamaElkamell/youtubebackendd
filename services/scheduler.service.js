@@ -550,11 +550,11 @@ async function optimizedProcessSchedule(scheduleId) {
       console.log(`Schedule ${scheduleId} has no valid targets or templates`);
       return false;
     }
-
-    await optimizedAccountProcessing(schedule, targetVideos);
        if (schedule.schedule.type === 'interval') {
       await handleIntervalSchedule(schedule, scheduleId);
     }
+    await optimizedAccountProcessing(schedule, targetVideos);
+
     return true;
   } catch (error) {
     console.error(`Error processing schedule ${scheduleId}:`, error);
