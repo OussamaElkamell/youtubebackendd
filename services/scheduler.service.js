@@ -128,7 +128,7 @@ async function handleIntervalSchedule(schedule, scheduleId) {
     const currentSchedule = await ScheduleModel.findById(scheduleId).lean();
     if (!currentSchedule) return;
 
-    // Calculate interval (same logic as before)
+    // Calculate interval
     let intervalMs;
     const postedComments = currentSchedule.progress?.postedComments || 0;
     const limitComments = currentSchedule.delays?.limitComments || 0;
@@ -139,26 +139,45 @@ async function handleIntervalSchedule(schedule, scheduleId) {
       const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
       intervalMs = randomDelay * 60 * 1000;
       console.log(`Applying random delay of ${randomDelay} minutes`);
-            await ScheduleModel.updateOne(
+      
+      // Save the delay and update the job
+      await ScheduleModel.updateOne(
         { _id: schedule._id },
         { $set: { 'delays.delayofsleep': randomDelay } }
       );
-    } else {
-      intervalMs = calculateIntervalMs(currentSchedule.schedule.interval);
-           await ScheduleModel.updateOne(
-        { _id: schedule._id },
-        { $set: { 'delays.delayofsleep': 0 } }
-      );
+      
+      // Remove any existing job
+      const jobId = `interval-${scheduleId}`;
+      const jobs = await scheduleQueue.getRepeatableJobs();
+      const existingJob = jobs.find(j => j.id === jobId);
+      if (existingJob) await scheduleQueue.removeRepeatableByKey(existingJob.key);
+      
+      // Create new job with the updated delay
+      await scheduleQueue.add('process-schedule', { scheduleId }, {
+        repeat: { every: intervalMs },
+        jobId,
+        removeOnComplete: true,
+        removeOnFail: true
+      });
+
+      return;
     }
 
-    // Manage the job (same as before)
+    // If no special delay is needed, use the normal interval
+    intervalMs = calculateIntervalMs(currentSchedule.schedule.interval);
+    await ScheduleModel.updateOne(
+      { _id: schedule._id },
+      { $set: { 'delays.delayofsleep': 0 } }
+    );
+
+    // Manage the job
     const jobId = `interval-${scheduleId}`;
     const jobs = await scheduleQueue.getRepeatableJobs();
     const existingJob = jobs.find(j => j.id === jobId);
     if (existingJob) await scheduleQueue.removeRepeatableByKey(existingJob.key);
     
     await scheduleQueue.add('process-schedule', { scheduleId }, {
-      delay: intervalMs,  // Using delay instead of repeat
+      repeat: { every: intervalMs },
       jobId,
       removeOnComplete: true,
       removeOnFail: true
@@ -166,8 +185,9 @@ async function handleIntervalSchedule(schedule, scheduleId) {
 
     activeJobs.set(scheduleId, {
       stop: async () => {
-        const job = await scheduleQueue.getJob(jobId);
-        if (job) await job.remove();
+        const jobs = await scheduleQueue.getRepeatableJobs();
+        const job = jobs.find(j => j.id === jobId);
+        if (job) await scheduleQueue.removeRepeatableByKey(job.key);
       }
     });
 
@@ -182,14 +202,14 @@ async function setupScheduleJob(scheduleId) {
   try {
     // Stop existing job if it exists
     if (activeJobs.has(scheduleId)) {
-      activeJobs.get(scheduleId).stop();
+      await activeJobs.get(scheduleId).stop();
       activeJobs.delete(scheduleId);
     }
     
     const schedule = await ScheduleModel.findById(scheduleId).lean();
     if (!schedule || schedule.status !== 'active') return false;
 
-    // Cache schedule info with pipeline
+    // Cache schedule info
     await redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
       id: schedule._id.toString(),
       status: schedule.status,
@@ -221,12 +241,21 @@ async function setupScheduleJob(scheduleId) {
         
       case 'interval':
         if (schedule.schedule.interval?.value > 0) {
-          const intervalMs = calculateIntervalMs(schedule.schedule.interval);
-          const jobId = `recurring-${scheduleId}`;
+          // Check if we should use the stored delayofsleep
+          let intervalMs;
+          if (schedule.delays?.delayofsleep > 0) {
+            intervalMs = schedule.delays.delayofsleep * 60 * 1000;
+          } else {
+            intervalMs = calculateIntervalMs(schedule.schedule.interval);
+          }
+          
+          const jobId = `interval-${scheduleId}`;
           
           await scheduleQueue.add('process-schedule', { scheduleId }, {
             repeat: { every: intervalMs },
-            jobId
+            jobId,
+            removeOnComplete: true,
+            removeOnFail: true
           });
           
           activeJobs.set(scheduleId, {
