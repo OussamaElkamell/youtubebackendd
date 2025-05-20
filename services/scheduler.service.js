@@ -125,83 +125,55 @@ async function handleIntervalSchedule(schedule, scheduleId) {
   if (!schedule.schedule.interval?.value > 0) return;
 
   try {
-    // 1. Get fresh schedule data with proper error handling
     const currentSchedule = await ScheduleModel.findById(scheduleId).lean();
-    if (!currentSchedule) {
-      console.error(`Schedule ${scheduleId} not found`);
-      return;
-    }
+    if (!currentSchedule) return;
 
-    // 2. Calculate current conditions with safety checks
+    // Calculate interval (same logic as before)
+    let intervalMs;
     const postedComments = currentSchedule.progress?.postedComments || 0;
     const limitComments = currentSchedule.delays?.limitComments || 0;
-    const minDelay = currentSchedule.delays?.minDelay || 1;  // Default 1 minute
-    const maxDelay = currentSchedule.delays?.maxDelay || 30; // Default 30 minutes
-
-    // 3. Determine if we should apply random delay
-    const shouldApplyRandomDelay = limitComments > 0 && 
-                                 postedComments % limitComments === 0 &&
-                                 postedComments > 0;
-
-    // 4. Calculate appropriate interval
-    let intervalMs;
-    let delayOfSleep = 0;
     
-    if (shouldApplyRandomDelay) {
-      // Calculate fresh random delay within bounds
-      delayOfSleep = Math.max(minDelay, 
-        Math.min(
-          maxDelay,
-          Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay
-        )
+    if (limitComments > 0 && postedComments % limitComments === 0 && postedComments > 0) {
+      const minDelay = currentSchedule.delays.minDelay || 1;
+      const maxDelay = currentSchedule.delays.maxDelay || 30;
+      const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+      intervalMs = randomDelay * 60 * 1000;
+      console.log(`Applying random delay of ${randomDelay} minutes`);
+            await ScheduleModel.updateOne(
+        { _id: schedule._id },
+        { $set: { 'delays.delayofsleep': randomDelay } }
       );
-      intervalMs = delayOfSleep * 60 * 1000;
-      console.log(`[Schedule ${scheduleId}] Applying random delay: ${delayOfSleep} mins (${postedComments}/${limitComments} comments)`);
     } else {
-      // Use standard interval with validation
       intervalMs = calculateIntervalMs(currentSchedule.schedule.interval);
-      console.log(`[Schedule ${scheduleId}] Using standard interval: ${intervalMs}ms`);
+           await ScheduleModel.updateOne(
+        { _id: schedule._id },
+        { $set: { 'delays.delayofsleep': 0 } }
+      );
     }
 
-    // 5. Update schedule status in database
-    await ScheduleModel.updateOne(
-      { _id: scheduleId },
-      { $set: { 'delays.delayofsleep': delayOfSleep } }
-    );
-
-    // 6. Manage the recurring job
+    // Manage the job (same as before)
     const jobId = `interval-${scheduleId}`;
-    
-    // Clean up existing job if present
     const jobs = await scheduleQueue.getRepeatableJobs();
     const existingJob = jobs.find(j => j.id === jobId);
-    if (existingJob) {
-      await scheduleQueue.removeRepeatableByKey(existingJob.key);
-      console.log(`[Schedule ${scheduleId}] Removed previous interval job`);
-    }
+    if (existingJob) await scheduleQueue.removeRepeatableByKey(existingJob.key);
     
-    // Add new recurring job
     await scheduleQueue.add('process-schedule', { scheduleId }, {
-      repeat: { every: intervalMs },
+      delay: intervalMs,  // Using delay instead of repeat
       jobId,
       removeOnComplete: true,
       removeOnFail: true
     });
 
-    console.log(`[Schedule ${scheduleId}] Next run in ${intervalMs}ms`);
-
-    // Update active jobs tracker
     activeJobs.set(scheduleId, {
       stop: async () => {
-        const jobs = await scheduleQueue.getRepeatableJobs();
-        const job = jobs.find(j => j.id === jobId);
-        if (job) await scheduleQueue.removeRepeatableByKey(job.key);
+        const job = await scheduleQueue.getJob(jobId);
+        if (job) await job.remove();
       }
     });
 
   } catch (error) {
-    console.error(`Error handling interval schedule ${scheduleId}:`, error);
-    throw error; // Re-throw for queue to handle retries
+    console.error(`Error handling interval for ${scheduleId}:`, error);
+    throw error;
   }
 }
 
@@ -247,8 +219,24 @@ async function setupScheduleJob(scheduleId) {
         }
         break;
         
-       case 'interval':
-        await handleIntervalSchedule(schedule, scheduleId);
+      case 'interval':
+        if (schedule.schedule.interval?.value > 0) {
+          const intervalMs = calculateIntervalMs(schedule.schedule.interval);
+          const jobId = `recurring-${scheduleId}`;
+          
+          await scheduleQueue.add('process-schedule', { scheduleId }, {
+            repeat: { every: intervalMs },
+            jobId
+          });
+          
+          activeJobs.set(scheduleId, {
+            stop: async () => {
+              const jobs = await scheduleQueue.getRepeatableJobs();
+              const job = jobs.find(j => j.id === jobId);
+              if (job) await scheduleQueue.removeRepeatableByKey(job.key);
+            }
+          });
+        }
         break;
     }
     return true;
@@ -558,6 +546,9 @@ async function optimizedProcessSchedule(scheduleId) {
     }
 
     await optimizedAccountProcessing(schedule, targetVideos);
+       if (schedule.schedule.type === 'interval') {
+      await handleIntervalSchedule(schedule, scheduleId);
+    }
     return true;
   } catch (error) {
     console.error(`Error processing schedule ${scheduleId}:`, error);
