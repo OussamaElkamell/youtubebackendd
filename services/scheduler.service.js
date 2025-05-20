@@ -121,6 +121,50 @@ async function setupScheduler() {
     return false;
   }
 }
+async function handleIntervalSchedule(schedule, scheduleId) {
+  if (schedule.schedule.interval?.value > 0) {
+    let intervalMs;
+    const postedComments = schedule.progress?.postedComments || 0;
+    const isInProgress = !!schedule.progress;
+    const commentsTrigger = schedule.delays.limitComments !== 0
+      ? postedComments % schedule.delays.limitComments === 0
+      : false;
+
+    const minDelay = schedule.delays.minDelay;
+    const maxDelay = schedule.delays.maxDelay;
+
+    if (isInProgress && commentsTrigger && postedComments !== 0) {
+      const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+      intervalMs = randomDelay * 60 * 1000;
+      console.log('Wait for', intervalMs, 'ms (random sleep)');
+      await ScheduleModel.updateOne(
+        { _id: schedule._id },
+        { $set: { 'delays.delayofsleep': randomDelay } }
+      );
+    } else {
+      intervalMs = calculateIntervalMs(schedule.schedule.interval);
+      await ScheduleModel.updateOne(
+        { _id: schedule._id },
+        { $set: { 'delays.delayofsleep': 0 } }
+      );
+      console.log('Wait for original interval:', intervalMs, 'ms');
+    }
+
+    const jobId = `recurring-${scheduleId}`;
+    await scheduleQueue.add('process-schedule', { scheduleId }, {
+      repeat: { every: intervalMs },
+      jobId
+    });
+
+    activeJobs.set(scheduleId, {
+      stop: async () => {
+        const jobs = await scheduleQueue.getRepeatableJobs();
+        const job = jobs.find(j => j.id === jobId);
+        if (job) await scheduleQueue.removeRepeatableByKey(job.key);
+      }
+    });
+  }
+}
 
 // Optimized schedule job setup
 async function setupScheduleJob(scheduleId) {
@@ -164,60 +208,10 @@ async function setupScheduleJob(scheduleId) {
         }
         break;
         
-      case 'interval':
-  if (schedule.schedule.interval?.value > 0) {
-    let intervalMs;
-
-    const postedComments = schedule.progress?.postedComments || 0;
-    const isInProgress = !!schedule.progress;
-    const commentsTrigger = schedule.delays.limitComments !== 0
-  ? postedComments % schedule.delays.limitComments === 0
-  : false;
-
-    console.log('isInProgress :',isInProgress,'postedComments',postedComments,'commentsTrigger',commentsTrigger);
-    const minDelay = schedule.delays.minDelay;
-const maxDelay = schedule.delays.maxDelay;
-
- 
-
-    if (isInProgress && commentsTrigger && postedComments!==0 ) {
-    const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-
-      intervalMs = randomDelay * 60 * 1000 
-      console.log('wait for ',intervalMs ,"minutes");
-        await ScheduleModel.updateOne(
-  { _id: schedule._id },
-  { $set: { 'delays.delayofsleep': randomDelay } }
-);
-    } else {
-      intervalMs = calculateIntervalMs(schedule.schedule.interval);
-              await ScheduleModel.updateOne(
-  { _id: schedule._id },
-  { $set: { 'delays.delayofsleep':0 } }
-);
-       console.log('wait for original interval : ',intervalMs ,"ms");
-    }
-   
-    const jobId = `recurring-${scheduleId}`;
-
-    await scheduleQueue.add('process-schedule', { scheduleId }, {
-      repeat: { every: intervalMs },
-      jobId
-    });
-
-    activeJobs.set(scheduleId, {
-      stop: async () => {
-        const jobs = await scheduleQueue.getRepeatableJobs();
-        const job = jobs.find(j => j.id === jobId);
-        if (job) await scheduleQueue.removeRepeatableByKey(job.key);
-      }
-    });
-  }
-  
-
+       case 'interval':
+        await handleIntervalSchedule(schedule, scheduleId);
         break;
     }
-    
     return true;
   } catch (error) {
     console.error(`Error setting up schedule job ${scheduleId}:`, error);
@@ -308,7 +302,10 @@ function setupWorkers() {
       if (result.success) {
         updateFields.status = 'active';
         updateFields.proxyErrorCount = 0; // Reset on success
-        setupScheduleJob()
+       const schedule = await ScheduleModel.findById(scheduleId).lean(); 
+  if (schedule && schedule.schedule?.type === 'interval') {
+    await handleIntervalSchedule(schedule, scheduleId);
+  }
       } else if (proxyError) {
         const currentAccount = await YouTubeAccountModel.findById(comment.youtubeAccount._id);
         const currentCount = currentAccount?.proxyErrorCount || 0;
