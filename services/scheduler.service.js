@@ -74,7 +74,11 @@ async function initRedis() {
       socket: {
         tls: true,
         reconnectStrategy: (retries) => Math.min(retries * 100, 5000)
-      }
+      },
+        commandsQueueMaxLength: 1000,
+           disableClientInfo: true,
+  disableOfflineQueue: true,
+  legacyMode: false
     });
 
     redisClient.on('error', (err) => console.error('Redis Client Error:', err));
@@ -545,6 +549,9 @@ async function handleQuotaExceeded(profileId) {
 // Optimized schedule processing
 async function optimizedProcessSchedule(scheduleId) {
   try {
+        if (!redisClient.isOpen) {
+      await redisClient.connect();
+    }
     const [cachedSchedule, schedule] = await Promise.all([
       redisClient.get(`schedule:${scheduleId}`),
       ScheduleModel.findById(scheduleId)
