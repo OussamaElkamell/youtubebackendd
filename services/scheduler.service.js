@@ -52,9 +52,9 @@ const activeJobs = new Map();
 
 // Optimized delay calculation
 function calculateOptimizedDelay(delays) {
-  if (!delays || typeof delays.minDelay !== 'number' || typeof delays.maxDelay !== 'number') {
-    return 1000; // Default 1 second delay
-  }
+  
+    return 1000;
+  
 
   const max = Math.min(delays.maxDelay, 30);
   const min = Math.max(delays.minDelay, 1);
@@ -549,18 +549,41 @@ async function handleQuotaExceeded(profileId) {
 // Optimized schedule processing
 async function optimizedProcessSchedule(scheduleId) {
   try {
-        if (!redisClient.isOpen) {
+    // 1. Ensure Redis connection
+    if (!redisClient.isOpen) {
       await redisClient.connect();
     }
-    const [cachedSchedule, schedule] = await Promise.all([
-      redisClient.get(`schedule:${scheduleId}`),
-      ScheduleModel.findById(scheduleId)
-        .populate('selectedAccounts')
-        .populate('user')
-        .lean()
-    ]);
 
-    // 1. First check for active delay period
+    // 2. First check Redis cache with better error handling
+    let cachedSchedule;
+    try {
+      const cachedData = await redisClient.get(`schedule:${scheduleId}`);
+      cachedSchedule = cachedData ? JSON.parse(cachedData) : null;
+      
+      // If cache says error but job is still running, force refresh
+      if (cachedSchedule?.status === 'error') {
+        console.warn(`[Schedule ${scheduleId}] Cached status is error - attempting refresh`);
+        cachedSchedule = null;
+      }
+    } catch (cacheError) {
+      console.error(`[Schedule ${scheduleId}] Error reading cache:`, cacheError);
+      cachedSchedule = null;
+    }
+
+    // 3. Get fresh data from DB
+    const schedule = await ScheduleModel.findById(scheduleId)
+      .populate('selectedAccounts')
+      .populate('user')
+      .lean();
+
+    // 4. Validate schedule exists
+    if (!schedule) {
+      console.log(`[Schedule ${scheduleId}] Not found in database`);
+      await redisClient.del(`schedule:${scheduleId}`);
+      return false;
+    }
+
+    // 5. Check for active delay period
     if (schedule?.delays?.delayofsleep > 0 && schedule?.delays?.delayStartTime) {
       const delayStartTime = new Date(schedule.delays.delayStartTime);
       const delayEndTime = new Date(delayStartTime);
@@ -584,30 +607,25 @@ async function optimizedProcessSchedule(scheduleId) {
       }
     }
 
-    // 2. Check cached schedule status
-    if (cachedSchedule) {
-      const parsed = JSON.parse(cachedSchedule);
-      if (parsed.status !== 'active') {
-        console.log(`[Schedule ${scheduleId}] Cached status is not active (${parsed.status})`);
-        return false;
-      }
+    // 6. Update cache with fresh data if it was stale or missing
+    if (!cachedSchedule || cachedSchedule.status !== schedule.status) {
+      await redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
+        id: schedule._id.toString(),
+        status: schedule.status,
+        type: schedule.schedule.type,
+        user: schedule.user.toString()
+      }), { 
+        EX: schedule.status === 'error' ? 3600 : 86400 // Shorter TTL for error states
+      });
     }
 
-    // 3. Validate schedule exists and is active
-    if (!schedule || schedule.status !== 'active') {
-      console.log(`[Schedule ${scheduleId}] Not found or not active`);
-      if (schedule) {
-        await redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
-          id: schedule._id.toString(),
-          status: schedule.status,
-          type: schedule.schedule.type,
-          user: schedule.user.toString()
-        }), { EX: 86400 });
-      }
+    // 7. Check schedule status
+    if (schedule.status !== 'active') {
+      console.log(`[Schedule ${scheduleId}] Status is ${schedule.status} in database`);
       return false;
     }
 
-    // 4. Check end date
+    // 8. Check end date
     const now = new Date();
     if (schedule.schedule.endDate && new Date(schedule.schedule.endDate) < now) {
       console.log(`[Schedule ${scheduleId}] Schedule has ended`);
@@ -625,27 +643,76 @@ async function optimizedProcessSchedule(scheduleId) {
       return false;
     }
 
-    // 5. Validate targets and templates
+    // 9. Validate targets and templates
     const targetVideos = [...schedule.targetVideos];
     if ((targetVideos.length === 0 && schedule.targetChannels.length === 0) ||
         schedule.commentTemplates.length === 0) {
       console.log(`[Schedule ${scheduleId}] No valid targets or templates`);
+      await ScheduleModel.updateOne(
+        { _id: scheduleId },
+        { 
+          status: 'requires_review',
+          errorMessage: 'No valid targets or templates'
+        }
+      );
       return false;
     }
 
-    // 6. Update last processed time
+    // 10. Update last processed time and reset error count if successful
     await ScheduleModel.updateOne(
       { _id: scheduleId },
-      { $set: { lastProcessedAt: new Date() } }
+      { 
+        $set: { 
+          lastProcessedAt: new Date(),
+          errorMessage: null,
+          status: 'active' // Ensure it's active
+        },
+        $unset: {
+          errorCount: "" // Reset error counter
+        }
+      }
     );
 
-    // 7. Process accounts and create comments (if not in delay period)
+    // 11. Process accounts and create comments
     await optimizedAccountProcessing(schedule, targetVideos);
 
     return true;
+
   } catch (error) {
     console.error(`[Schedule ${scheduleId}] Error processing schedule:`, error);
-    await handleScheduleError(scheduleId, error);
+    
+    // Enhanced error handling
+    try {
+      const currentStatus = await ScheduleModel.findById(scheduleId).select('status').lean();
+      
+      // Only update to error if currently active to prevent overwriting manual changes
+      if (currentStatus?.status === 'active') {
+        const errorCount = (currentStatus.errorCount || 0) + 1;
+        
+        // After 3 errors, mark for review instead of error
+        const newStatus = errorCount >= 3 ? 'requires_review' : 'error';
+        
+        await ScheduleModel.updateOne(
+          { _id: scheduleId },
+          { 
+            status: newStatus,
+            errorMessage: error.message?.substring(0, 500) || 'Unknown error',
+            errorCount
+          }
+        );
+        
+        // Update cache but with shorter TTL
+        await redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
+          id: scheduleId,
+          status: newStatus,
+          type: 'unknown', // Will refresh next run
+          user: 'unknown'
+        }), { EX: 3600 }); // 1 hour TTL for error states
+      }
+    } catch (updateError) {
+      console.error(`[Schedule ${scheduleId}] Error updating error status:`, updateError);
+    }
+    
     return false;
   }
 }
@@ -882,7 +949,7 @@ function setupQueueMonitoring() {
 
 // Maintenance job
 function setupMaintenanceJob() {
-  const job = cron.schedule('0 0 * * *', async () => {
+  const job = cron.schedule('*/30 * * * *', async () => {
     try {
       console.log('Running maintenance tasks...');
       
@@ -988,6 +1055,7 @@ async function cleanSchedulerData() {
 module.exports = {
   setupScheduler,
   setupScheduleJob,
+  setupMaintenanceJob,
   processSchedule: optimizedProcessSchedule,
   cleanSchedulerData,
   scheduleQuotaReset,
