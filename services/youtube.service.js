@@ -9,6 +9,8 @@ const axios = require('axios');
 
 
 const ApiProfile = require('../models/ApiProfile');
+const { ScheduleModel } = require('../models/schedule.model');
+
 
 async function getActiveProfile() {
   try {
@@ -99,6 +101,22 @@ function addRandomEmojis(text) {
 
   return `${text} ${randomEmojis}`;
 }
+function randomizeSiParamInYoutubeUrl(content) {
+  const regex = /https:\/\/youtu\.be\/[^\s?]+\?si=([a-zA-Z0-9_-]+)/g;
+  return content.replace(regex, (match, oldSi) => {
+    const newSi = generateRandomString(16); // 16-character string
+    return match.replace(`?si=${oldSi}`, `?si=${newSi}`);
+  });
+}
+
+function generateRandomString(length) {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_';
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return result;
+}
 
 /**
  * Post a comment to YouTube
@@ -140,8 +158,11 @@ async function postComment(commentId) {
     // Refresh token if needed
     const oauth2Client = await refreshTokenIfNeeded(account);
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-
+const schedule = await ScheduleModel.findById(comment.scheduleId).exec();
+    const includeEmojis = schedule?.includeEmojis === true;
     // Fetch and create the proxy agent if available
+    console.log('includeEmojissssssssssssssssssssssss',includeEmojis);
+    
     const proxy = account.proxy;
     let agent;
     if (proxy) {
@@ -163,11 +184,16 @@ async function postComment(commentId) {
       throw new Error("Comment content is empty");
     }
     let sanitizedContent = comment.content.trim();
-    sanitizedContent = addRandomEmojis(sanitizedContent);
+    if (includeEmojis) {
+      sanitizedContent = addRandomEmojis(sanitizedContent);
+    }
+    sanitizedContent = randomizeSiParamInYoutubeUrl(sanitizedContent);
     if (!sanitizedContent) {
       throw new Error("Comment content is empty after trimming");
     }
     
+
+
     const commentData = {
       snippet: {
         videoId: comment.videoId,

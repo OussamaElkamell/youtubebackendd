@@ -89,6 +89,7 @@ router.post('/', authenticateJWT, async (req, res, next) => {
       accountSelection,
       selectedAccounts,
       schedule: scheduleConfig,
+      includeEmojis,
       delays
     } = req.body;
     
@@ -139,6 +140,7 @@ router.post('/', authenticateJWT, async (req, res, next) => {
         maxDelay: 180,
         betweenAccounts: 300
       },
+      includeEmojis:includeEmojis,
       status: 'active',
       interval: scheduleConfig.interval || { value: 1, unit: 'minutes' } // Default interval if not provided
     });

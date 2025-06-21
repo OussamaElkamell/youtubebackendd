@@ -9,76 +9,56 @@ const ApiProfile = require('../models/ApiProfile');
 const { postComment } = require('./youtube.service');
 const { assignRandomProxy } = require('./proxy.service');
 
-// Redis connection with optimized configuration
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
-let redisClient;
-
-// BullMQ queues with optimized settings
-const commentQueue = new Queue('comment-posting', { 
-  connection: { 
-    host: process.env.REDIS_HOST || 'localhost',
-    port: process.env.REDIS_PORT || 6379,
-    maxRetriesPerRequest: null,
-    enableOfflineQueue: false,
-    username: 'default',
-    password:process.env.REDIS_PASSWORD,
+// Configuration constants
+const REDIS_CONFIG = {
+host: process.env.REDIS_HOST || 'localhost',
+      port: process.env.REDIS_PORT || 6379,
+      username: 'default',
+    password: process.env.REDIS_PASSWORD,
     tls:{}
-    
-  },
+
+};
+
+const QUEUE_CONFIG = {
+  connection: REDIS_CONFIG,
   defaultJobOptions: {
     attempts: 3,
-    backoff: {
-      type: 'exponential',
-      delay: 3000
-    },
+    backoff: { type: 'exponential', delay: 3000 },
     removeOnComplete: true,
     removeOnFail: 1000
   }
-});
+};
 
-const scheduleQueue = new Queue('schedule-processing', {
-  connection: {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: process.env.REDIS_PORT || 6379,
-    maxRetriesPerRequest: null,
-    username: 'default',
-    password: process.env.REDIS_PASSWORD,
-    tls:{}
-  }
-});
+// Redis client singleton
+let redisClient;
+
+// BullMQ queues
+const commentQueue = new Queue('comment-posting', QUEUE_CONFIG);
+const scheduleQueue = new Queue('schedule-processing', QUEUE_CONFIG);
 
 // Active jobs tracker
 const activeJobs = new Map();
 
-// Optimized delay calculation
-function calculateOptimizedDelay(delays) {
-  
-    return 1000;
-  
+// Round-robin account selector state
+let lastUsedIndex = -1;
 
-  const max = Math.min(delays.maxDelay, 30);
-  const min = Math.max(delays.minDelay, 1);
-  
-  // Logarithmic distribution for more short delays
-  return Math.floor(
-    Math.pow(10, Math.random() * Math.log10(max - min + 1)) + min - 1
-  ) * 1000;
-}
-
-// Redis initialization with better error handling
+/**
+ * Initialize Redis connection with optimized settings
+ */
 async function initRedis() {
   try {
+    if (redisClient?.isOpen) return true;
+
     redisClient = createClient({
-      url : process.env.REDIS_URL,
-      
+      url: process.env.REDIS_URL,
       socket: {
-        tls: true,
+        tls: process.env.NODE_ENV === 'production',
         reconnectStrategy: (retries) => Math.min(retries * 100, 5000)
       },
-        commandsQueueMaxLength: 1000,
-           disableClientInfo: true,
-  disableOfflineQueue: true,
-  legacyMode: false
+      commandsQueueMaxLength: 1000,
+      disableClientInfo: true,
+      disableOfflineQueue: true,
+      legacyMode: false
     });
 
     redisClient.on('error', (err) => console.error('Redis Client Error:', err));
@@ -91,32 +71,48 @@ async function initRedis() {
   }
 }
 
-// Optimized scheduler setup
+/**
+ * Calculate optimized delay with logarithmic distribution
+ */
+function calculateOptimizedDelay(delays = {}) {
+  if (!delays || !delays.maxDelay) return 1000;
+
+  const max = Math.min(delays.maxDelay, 30);
+  const min = Math.max(delays.minDelay || 1, 1);
+  
+  return Math.floor(
+    Math.pow(10, Math.random() * Math.log10(max - min + 1)) + min - 1
+  ) * 1000;
+}
+
+/**
+ * Main scheduler setup function
+ */
 async function setupScheduler() {
   try {
     console.log('Setting up optimized scheduler...');
     
-    // Parallel initialization
     const [redisReady] = await Promise.all([
       initRedis(),
       mongoose.connection
     ]);
 
     if (!redisReady) throw new Error('Redis connection failed');
-    
+  
     setupWorkers();
     
-    // Batch process active schedules
     const activeSchedules = await ScheduleModel.find({ status: 'active' }).lean();
     console.log(`Found ${activeSchedules.length} active schedules`);
-    
+       setupQueueMonitoring();
     await Promise.all(
       activeSchedules.map(schedule => setupScheduleJob(schedule._id))
     );
-    
+   
     setupImmediateCommentsProcessor();
     setupMaintenanceJob();
-    setupQueueMonitoring();
+    setupMaintenanceSheduler()
+    scheduleQuotaReset();
+    // scheduleFrequentStatusReset();
     
     console.log('Optimized scheduler setup complete');
     return true;
@@ -125,6 +121,85 @@ async function setupScheduler() {
     return false;
   }
 }
+
+/**
+ * Setup schedule job based on type
+ */
+async function setupScheduleJob(scheduleId) {
+  try {
+    // Stop existing job if it exists
+    if (activeJobs.has(scheduleId)) {
+      await activeJobs.get(scheduleId).stop();
+      activeJobs.delete(scheduleId);
+    }
+    
+    const schedule = await ScheduleModel.findById(scheduleId).lean();
+    if (!schedule || schedule.status !== 'active') return false;
+
+    // Cache schedule info
+    await redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
+      id: schedule._id.toString(),
+      status: schedule.status,
+      type: schedule.schedule.type,
+      user: schedule.user.toString()
+    }), { EX: 86400 });
+
+    // Process schedule type
+    switch (schedule.schedule.type) {
+      case 'immediate':
+        await scheduleQueue.add('process-schedule', { scheduleId }, { priority: 1 });
+        break;
+        
+      case 'once':
+        const delayMs = Math.max(0, new Date(schedule.schedule.startDate) - Date.now());
+        await scheduleQueue.add('process-schedule', { scheduleId }, { delay: delayMs });
+        break;
+        
+      case 'recurring':
+        if (schedule.schedule.cronExpression) {
+          const job = cron.schedule(schedule.schedule.cronExpression, async () => {
+            await scheduleQueue.add('process-schedule', { scheduleId });
+          }, { timezone: 'America/Los_Angeles' });
+          activeJobs.set(scheduleId, job);
+        }
+        break;
+        
+      case 'interval':
+        
+        if (schedule.schedule.interval?.value > 0) {
+          const intervalMs = schedule.delays?.delayofsleep > 0 
+            ? schedule.delays.delayofsleep * 60 * 1000
+            : calculateIntervalMs(schedule.schedule.interval);
+          
+          const jobId = `interval-${scheduleId}`;
+          
+          await scheduleQueue.add('process-schedule', { scheduleId }, {
+            repeat: { every: intervalMs },
+            jobId,
+            removeOnComplete: true,
+            removeOnFail: true
+          });
+            console.log('Check');
+          activeJobs.set(scheduleId, {
+            stop: async () => {
+              const jobs = await scheduleQueue.getRepeatableJobs();
+              const job = jobs.find(j => j.id === jobId);
+              if (job) await scheduleQueue.removeRepeatableByKey(job.key);
+            }
+          });
+        }
+        break;
+    }
+    return true;
+  } catch (error) {
+    console.error(`Error setting up schedule job ${scheduleId}:`, error);
+    return false;
+  }
+}
+
+/**
+ * Handle interval schedule with delay logic
+ */
 async function handleIntervalSchedule(schedule, scheduleId) {
   if (!schedule.schedule.interval?.value > 0) return;
 
@@ -144,13 +219,12 @@ async function handleIntervalSchedule(schedule, scheduleId) {
       intervalMs = randomDelay * 60 * 1000;
       console.log(`[Schedule ${scheduleId}] Applying random delay of ${randomDelay} minutes`);
       
-      // Save the delay and the start time of the delay period
       await ScheduleModel.updateOne(
         { _id: schedule._id },
         { 
           $set: { 
             'delays.delayofsleep': randomDelay,
-            'delays.delayStartTime': new Date()  // Save when the delay started
+            'delays.delayStartTime': new Date()
           } 
         }
       );
@@ -179,7 +253,7 @@ async function handleIntervalSchedule(schedule, scheduleId) {
       { 
         $set: { 
           'delays.delayofsleep': 0,
-          'delays.delayStartTime': null  // Clear delay start time
+          'delays.delayStartTime': null
         } 
       }
     );
@@ -211,122 +285,40 @@ async function handleIntervalSchedule(schedule, scheduleId) {
   }
 }
 
-
-// Optimized schedule job setup
-async function setupScheduleJob(scheduleId) {
-  try {
-    // Stop existing job if it exists
-    if (activeJobs.has(scheduleId)) {
-      await activeJobs.get(scheduleId).stop();
-      activeJobs.delete(scheduleId);
-    }
-    
-    const schedule = await ScheduleModel.findById(scheduleId).lean();
-    if (!schedule || schedule.status !== 'active') return false;
-
-    // Cache schedule info
-    await redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
-      id: schedule._id.toString(),
-      status: schedule.status,
-      type: schedule.schedule.type,
-      user: schedule.user.toString()
-    }), { EX: 86400 });
-
-    // Process schedule type
-    switch (schedule.schedule.type) {
-      case 'immediate':
-        await scheduleQueue.add('process-schedule', { scheduleId }, {
-          priority: 1
-        });
-        break;
-        
-      case 'once':
-        const delayMs = Math.max(0, new Date(schedule.schedule.startDate) - Date.now());
-        await scheduleQueue.add('process-schedule', { scheduleId }, { delay: delayMs });
-        break;
-        
-      case 'recurring':
-        if (schedule.schedule.cronExpression) {
-          const job = cron.schedule(schedule.schedule.cronExpression, async () => {
-            await scheduleQueue.add('process-schedule', { scheduleId });
-          });
-          activeJobs.set(scheduleId, job);
-        }
-        break;
-        
-      case 'interval':
-        if (schedule.schedule.interval?.value > 0) {
-          // Check if we should use the stored delayofsleep
-          let intervalMs;
-          if (schedule.delays?.delayofsleep > 0) {
-            intervalMs = schedule.delays.delayofsleep * 60 * 1000;
-          } else {
-            intervalMs = calculateIntervalMs(schedule.schedule.interval);
-          }
-          
-          const jobId = `interval-${scheduleId}`;
-          
-          await scheduleQueue.add('process-schedule', { scheduleId }, {
-            repeat: { every: intervalMs },
-            jobId,
-            removeOnComplete: true,
-            removeOnFail: true
-          });
-          
-          activeJobs.set(scheduleId, {
-            stop: async () => {
-              const jobs = await scheduleQueue.getRepeatableJobs();
-              const job = jobs.find(j => j.id === jobId);
-              if (job) await scheduleQueue.removeRepeatableByKey(job.key);
-            }
-          });
-        }
-        break;
-    }
-    return true;
-  } catch (error) {
-    console.error(`Error setting up schedule job ${scheduleId}:`, error);
-    return false;
-  }
-}
-
-// Worker setup with higher concurrency
+/**
+ * Setup workers for processing queues
+ */
 function setupWorkers() {
   // Schedule worker
-  const scheduleWorker = new Worker('schedule-processing', async (job) => {
-    const { scheduleId } = job.data;
-    try {
-      await optimizedProcessSchedule(scheduleId);
-      return { success: true, scheduleId };
-    } catch (error) {
-      console.error(`Error processing schedule ${scheduleId}:`, error);
-      throw error;
-    }
-  }, {
-    connection: { 
-      host: process.env.REDIS_HOST || 'localhost',
-      port: process.env.REDIS_PORT || 6379,
-      username: 'default',
-    password: process.env.REDIS_PASSWORD,
-    tls:{}
-    },
-    concurrency: 30,
-    limiter: {
-      max: 100,
-      duration: 1000
-    }
-  });
+const scheduleWorker = new Worker('schedule-processing', async (job) => {
+  console.log(`Processing schedule job ${job.id} with data:`, job.data);
+  const { scheduleId } = job.data;
+  try {
+    await optimizedProcessSchedule(scheduleId);
+  } catch (error) {
+    console.error(`Error processing schedule ${scheduleId}:`, error);
+    throw error;
+  }
+}, {
+  connection: REDIS_CONFIG,
+  concurrency: 5
+});
 
+scheduleWorker.on('completed', (job) => {
+  console.log(`Schedule job ${job.id} completed`);
+});
+
+scheduleWorker.on('failed', (job, err) => {
+  console.error(`Schedule job ${job.id} failed:`, err);
+});
   // Comment worker
   const commentWorker = new Worker('comment-posting', async (job) => {
-    const { commentId,scheduleId } = job.data;
-    console.log("job.data", job.data);
-  
+    const { commentId, scheduleId } = job.data;
+    console.log("hello");
+    
     try {
       const comment = await getCommentWithRetry(commentId);
       if (!comment) throw new Error(`Comment ${commentId} not found`);
-  
-      
   
       if (!comment.youtubeAccount || comment.youtubeAccount.status !== 'active') {
         await CommentModel.updateOne(
@@ -335,27 +327,17 @@ function setupWorkers() {
         );
   
         await ScheduleModel.updateOne(
-          { _id: comment.scheduleId },
+          { _id: scheduleId },
           { $inc: { 'progress.failedComments': 1 } }
         );
   
         return { success: false, message: 'Invalid or inactive account' };
       }
       
- 
       const result = await postComment(commentId);
-      console.log("reesssssssssult", result);
   
-      const quotaExceeded =
-        result.error?.includes("quota") ||
-        result.error?.includes("dailyLimitExceeded");
-  
-      const proxyError =
-        result.error?.includes("proxy") ||
-        result.error?.includes("invalid proxy") ||
-        result.error === "invalid proxy";
-  
-      console.log("proxxxxxxxxxxxy", proxyError);
+      const quotaExceeded = result.error?.includes("quota") || result.error?.includes("dailyLimitExceeded");
+      const proxyError = result.error?.includes("proxy") || result.error?.includes("invalid proxy") || result.error === "invalid proxy";
   
       const updateProgress = result.success
         ? { $inc: { 'progress.postedComments': 1 } }
@@ -363,31 +345,24 @@ function setupWorkers() {
   
       await ScheduleModel.updateOne({ _id: scheduleId }, updateProgress);
   
-      // Initialize updateFields
       let updateFields = {
-        lastMessage: result.success
-          ? 'Comment posted successfully'
-          : result.error || 'Unknown error',
+        lastMessage: result.success ? 'Comment posted successfully' : result.error || 'Unknown error',
       };
   
       if (result.success) {
         updateFields.status = 'active';
-        updateFields.proxyErrorCount = 0; // Reset on success
-      const schedule = await ScheduleModel.findById(scheduleId);
-  if (schedule?.schedule?.type === 'interval') {
-    await handleIntervalSchedule(schedule, scheduleId);
-  
-    }
+        updateFields.proxyErrorCount = 0;
+        const schedule = await ScheduleModel.findById(scheduleId);
+        if (schedule?.schedule?.type === 'interval') {
+          await handleIntervalSchedule(schedule, scheduleId);
+        }
       } else if (proxyError) {
         const currentAccount = await YouTubeAccountModel.findById(comment.youtubeAccount._id);
-        const currentCount = currentAccount?.proxyErrorCount || 0;
-        const newCount = currentCount + 1;
-  
+        const newCount = (currentAccount?.proxyErrorCount || 0) + 1;
         updateFields.proxyErrorCount = newCount;
         updateFields.status = newCount >= 3 ? 'inactive' : 'active';
       } else {
-        // For any other errors, mark the account as inactive immediately
-        updateFields.proxyErrorCount = 0; // Reset count on other error
+        updateFields.proxyErrorCount = 0;
         updateFields.status = 'inactive';
       }
   
@@ -407,7 +382,6 @@ function setupWorkers() {
       }
   
       await updateCommentStatus(commentId, result);
-  
       return result;
   
     } catch (error) {
@@ -416,22 +390,10 @@ function setupWorkers() {
       throw error;
     }
   }, {
-    connection: {
-      host: process.env.REDIS_HOST || 'localhost',
-      port: process.env.REDIS_PORT || 6379,
-      username: 'default',
-      password: process.env.REDIS_PASSWORD,
-      tls: {}
-    },
+    connection: REDIS_CONFIG,
     concurrency: 30,
-    limiter: {
-      max: 100,
-      duration: 1000
-    }
+    limiter: { max: 100, duration: 1000 }
   });
-  
-
-  
 
   // Worker event handlers
   scheduleWorker.on('completed', (job, result) => {
@@ -451,139 +413,38 @@ function setupWorkers() {
   });
 }
 
-function scheduleQuotaReset() {
-  cron.schedule('0 0 * * *', async () => {
-    try {
-      const updatedYT = await YouTubeAccountModel.updateMany(
-        {},
-        { $set: { status: 'active' } }
-      );
-
-      const updatedAPI = await ApiProfile.updateMany(
-        {},
-        { $set: { usedQuota: 0, status: 'not exceeded', exceededAt: null } }
-      );
-
-      const updatedSchedules = await ScheduleModel.updateMany(
-        {},
-        { $set: { status: 'active' } }
-      );
-
-      // Optionally call optimizedProcessSchedule for each schedule
-      const schedules = await ScheduleModel.find({});
-      for (const schedule of schedules) {
-        await optimizedProcessSchedule(schedule._id);
-      }
-
-      console.log(
-        `Quota reset complete at ${new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })}: ` +
-        `${updatedYT.modifiedCount} YT accounts, ` +
-        `${updatedAPI.modifiedCount} API profiles, ` +
-        `${updatedSchedules.modifiedCount} schedules updated.`
-      );
-    } catch (error) {
-      console.error('Error during daily quota reset:', error);
-    }
-  }, {
-    timezone: 'America/Los_Angeles'
-  });
-
-  console.log('Daily quota reset cron job scheduled for 00:00 PT.');
-}
-
-
-function scheduleFrequentStatusReset() {
-  // Every 15 seconds
-  cron.schedule('*/15 * * * * *', async () => {
-    try {
-      const updatedYT = await YouTubeAccountModel.updateMany(
-        {},
-        { $set: { status: 'active' } }
-      );
-
-      const updatedSchedules = await ScheduleModel.updateMany(
-        {},
-        { $set: { status: 'active' } }
-      );
-
-      console.log(`[${new Date().toISOString()}] Frequent reset: ${updatedYT.modifiedCount} YouTube accounts, ${updatedSchedules.modifiedCount} schedules updated.`);
-    } catch (error) {
-      console.error('Error during frequent status reset:', error);
-    }
-  }, {
-    timezone: 'America/Los_Angeles'
-  });
-}
-async function handleQuotaExceeded(profileId) {
-  try {
-    // Mark the profile as exceeded (only if not already)
-    const updateResult = await ApiProfile.updateOne(
-      { _id: profileId, status: { $ne: 'exceeded' } },
-      {
-        $set: {
-          status: 'exceeded',
-          exceededAt: new Date(),
-       
-        }
-      }
-    );
-
-    if (updateResult.modifiedCount === 0) {
-      console.log(`Profile ${profileId} is already marked as exceeded.`);
-    } else {
-      console.log(`Profile ${profileId} marked as exceeded.`);
-    }
-
-    // No need to schedule a specific reset job here anymore,
-    // because the global reset worker runs daily at midnight PT.
-    console.log(`Quota reset will be handled by global daily reset job.`);
-
-  } catch (error) {
-    console.error(`Error handling quota exceed for profile ${profileId}:`, error);
-  }
-}
-
-
-
-
-// Optimized schedule processing
+/**
+ * Optimized schedule processing
+ */
 async function optimizedProcessSchedule(scheduleId) {
   try {
-    // 1. Ensure Redis connection
-    if (!redisClient.isOpen) {
-      await redisClient.connect();
-    }
+    // Ensure Redis connection
+    if (!redisClient.isOpen) await redisClient.connect();
 
-    // 2. First check Redis cache with better error handling
+    // Check Redis cache
     let cachedSchedule;
     try {
       const cachedData = await redisClient.get(`schedule:${scheduleId}`);
       cachedSchedule = cachedData ? JSON.parse(cachedData) : null;
-      
-      // If cache says error but job is still running, force refresh
-      if (cachedSchedule?.status === 'error') {
-        console.warn(`[Schedule ${scheduleId}] Cached status is error - attempting refresh`);
-        cachedSchedule = null;
-      }
+      if (cachedSchedule?.status === 'error') cachedSchedule = null;
     } catch (cacheError) {
       console.error(`[Schedule ${scheduleId}] Error reading cache:`, cacheError);
       cachedSchedule = null;
     }
 
-    // 3. Get fresh data from DB
+    // Get fresh data from DB
     const schedule = await ScheduleModel.findById(scheduleId)
       .populate('selectedAccounts')
       .populate('user')
       .lean();
 
-    // 4. Validate schedule exists
     if (!schedule) {
       console.log(`[Schedule ${scheduleId}] Not found in database`);
       await redisClient.del(`schedule:${scheduleId}`);
       return false;
     }
 
-    // 5. Check for active delay period
+    // Check for active delay period
     if (schedule?.delays?.delayofsleep > 0 && schedule?.delays?.delayStartTime) {
       const delayStartTime = new Date(schedule.delays.delayStartTime);
       const delayEndTime = new Date(delayStartTime);
@@ -607,7 +468,7 @@ async function optimizedProcessSchedule(scheduleId) {
       }
     }
 
-    // 6. Update cache with fresh data if it was stale or missing
+    // Update cache with fresh data
     if (!cachedSchedule || cachedSchedule.status !== schedule.status) {
       await redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
         id: schedule._id.toString(),
@@ -615,17 +476,17 @@ async function optimizedProcessSchedule(scheduleId) {
         type: schedule.schedule.type,
         user: schedule.user.toString()
       }), { 
-        EX: schedule.status === 'error' ? 3600 : 86400 // Shorter TTL for error states
+        EX: schedule.status === 'error' ? 3600 : 86400
       });
     }
 
-    // 7. Check schedule status
+    // Check schedule status
     if (schedule.status !== 'active') {
       console.log(`[Schedule ${scheduleId}] Status is ${schedule.status} in database`);
       return false;
     }
 
-    // 8. Check end date
+    // Check end date
     const now = new Date();
     if (schedule.schedule.endDate && new Date(schedule.schedule.endDate) < now) {
       console.log(`[Schedule ${scheduleId}] Schedule has ended`);
@@ -643,7 +504,7 @@ async function optimizedProcessSchedule(scheduleId) {
       return false;
     }
 
-    // 9. Validate targets and templates
+    // Validate targets and templates
     const targetVideos = [...schedule.targetVideos];
     if ((targetVideos.length === 0 && schedule.targetChannels.length === 0) ||
         schedule.commentTemplates.length === 0) {
@@ -658,22 +519,20 @@ async function optimizedProcessSchedule(scheduleId) {
       return false;
     }
 
-    // 10. Update last processed time and reset error count if successful
+    // Update last processed time and reset error count
     await ScheduleModel.updateOne(
       { _id: scheduleId },
       { 
         $set: { 
           lastProcessedAt: new Date(),
           errorMessage: null,
-          status: 'active' // Ensure it's active
+          status: 'active'
         },
-        $unset: {
-          errorCount: "" // Reset error counter
-        }
+        $unset: { errorCount: "" }
       }
     );
 
-    // 11. Process accounts and create comments
+    // Process accounts and create comments
     await optimizedAccountProcessing(schedule, targetVideos);
 
     return true;
@@ -681,15 +540,11 @@ async function optimizedProcessSchedule(scheduleId) {
   } catch (error) {
     console.error(`[Schedule ${scheduleId}] Error processing schedule:`, error);
     
-    // Enhanced error handling
     try {
       const currentStatus = await ScheduleModel.findById(scheduleId).select('status').lean();
       
-      // Only update to error if currently active to prevent overwriting manual changes
       if (currentStatus?.status === 'active') {
         const errorCount = (currentStatus.errorCount || 0) + 1;
-        
-        // After 3 errors, mark for review instead of error
         const newStatus = errorCount >= 3 ? 'requires_review' : 'error';
         
         await ScheduleModel.updateOne(
@@ -701,13 +556,12 @@ async function optimizedProcessSchedule(scheduleId) {
           }
         );
         
-        // Update cache but with shorter TTL
         await redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
           id: scheduleId,
           status: newStatus,
-          type: 'unknown', // Will refresh next run
+          type: 'unknown',
           user: 'unknown'
-        }), { EX: 3600 }); // 1 hour TTL for error states
+        }), { EX: 3600 });
       }
     } catch (updateError) {
       console.error(`[Schedule ${scheduleId}] Error updating error status:`, updateError);
@@ -716,7 +570,10 @@ async function optimizedProcessSchedule(scheduleId) {
     return false;
   }
 }
-// Optimized account processing
+
+/**
+ * Process accounts for a schedule
+ */
 async function optimizedAccountProcessing(schedule, targetVideos) {
   const accounts = getAccountsByStrategy(schedule);
   if (accounts.length === 0) {
@@ -729,11 +586,13 @@ async function optimizedAccountProcessing(schedule, targetVideos) {
   }
 
   await Promise.all([
-    // assignProxiesToAccounts(accounts, schedule.user),
     processCommentsForAccounts(accounts, targetVideos, schedule)
   ]);
 }
 
+/**
+ * Select accounts based on strategy
+ */
 function getAccountsByStrategy(schedule) {
   const activeAccounts = schedule.selectedAccounts.filter(a => a.status === 'active');
   if (activeAccounts.length === 0) return [];
@@ -742,27 +601,36 @@ function getAccountsByStrategy(schedule) {
     case 'specific': return activeAccounts;
     case 'random': return [activeAccounts[Math.floor(Math.random() * activeAccounts.length)]];
     case 'round-robin': 
-      return [...activeAccounts].sort((a, b) => 
-        (a.lastUsed || 0) - (b.lastUsed || 0));
+      return activeAccounts.length > 0 ? [selectRoundRobinAccount(activeAccounts)] : [];
     default: return [];
   }
 }
 
-async function assignProxiesToAccounts(accounts, userId) {
-  await Promise.all(accounts.map(account => 
-    !account.proxy ? assignRandomProxy(userId, account._id) : Promise.resolve()
-  ));
+/**
+ * Round-robin account selection
+ */
+function selectRoundRobinAccount(accounts) {
+  if (!accounts || accounts.length === 0) return null;
+  if (accounts.length === 1) {
+    lastUsedIndex = 0;
+    return accounts[0];
+  }
+
+  const nextIndex = (lastUsedIndex + 1) % accounts.length;
+  lastUsedIndex = nextIndex;
+  return accounts[nextIndex];
 }
 
+/**
+ * Process comments for accounts
+ */
 async function processCommentsForAccounts(accounts, targetVideos, schedule) {
-  // Check if there's an active delay period
   if (schedule.delays?.delayofsleep > 0) {
     console.log(`[Schedule ${schedule._id}] Skipping comment creation - delay of ${schedule.delays.delayofsleep} minutes active`);
     return;
   }
 
   const comments = accounts.map(account => {
-    // Select a random video for this account
     const randomVideo = targetVideos[Math.floor(Math.random() * targetVideos.length)];
     
     return {
@@ -802,11 +670,16 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
   await commentQueue.addBulk(jobs);
 }
 
-// Helper functions
+/**
+ * Get random comment template
+ */
 function getRandomTemplate(templates) {
   return templates[Math.floor(Math.random() * templates.length)];
 }
 
+/**
+ * Get comment with retry logic
+ */
 async function getCommentWithRetry(commentId, maxAttempts = 3) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const comment = await CommentModel.findById(commentId)
@@ -820,6 +693,9 @@ async function getCommentWithRetry(commentId, maxAttempts = 3) {
   return null;
 }
 
+/**
+ * Update comment status after processing
+ */
 async function updateCommentStatus(commentId, result) {
   const update = result.success
     ? {
@@ -827,7 +703,6 @@ async function updateCommentStatus(commentId, result) {
         postedAt: new Date(),
         externalId: result.youtubeCommentId
       }
-      
     : {
         status: 'failed',
         errorMessage: result.error?.substring(0, 500),
@@ -836,6 +711,9 @@ async function updateCommentStatus(commentId, result) {
   await CommentModel.updateOne({ _id: commentId }, update);
 }
 
+/**
+ * Handle comment processing errors
+ */
 async function handleCommentError(commentId, error) {
   await CommentModel.updateOne(
     { _id: commentId },
@@ -847,31 +725,61 @@ async function handleCommentError(commentId, error) {
   );
 }
 
-async function handleScheduleError(scheduleId, error) {
+/**
+ * Handle quota exceeded scenario
+ */
+async function handleQuotaExceeded(profileId) {
   try {
-    const schedule = await ScheduleModel.findById(scheduleId);
-    if (!schedule) return;
+    const updateResult = await ApiProfile.updateOne(
+      { _id: profileId, status: { $ne: 'exceeded' } },
+      {
+        $set: {
+          status: 'exceeded',
+          exceededAt: new Date()
+        }
+      }
+    );
 
-    const update = {
-      status: 'error',
-      errorMessage: error.message?.substring(0, 500) || 'Unknown error'
-    };
+    if (updateResult.modifiedCount === 0) {
+      console.log(`Profile ${profileId} is already marked as exceeded.`);
+    } else {
+      console.log(`Profile ${profileId} marked as exceeded.`);
+    }
 
-    await Promise.all([
-      schedule.save(update),
-      redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
-        id: schedule._id.toString(),
-        status: 'error',
-        type: schedule.schedule.type,
-        user: schedule.user.toString(),
-        error: update.errorMessage
-      }), { EX: 86400 })
-    ]);
-  } catch (updateError) {
-    console.error(`Error updating schedule status for ${scheduleId}:`, updateError);
+    console.log(`Quota reset will be handled by global daily reset job.`);
+  } catch (error) {
+    console.error(`Error handling quota exceed for profile ${profileId}:`, error);
   }
 }
 
+/**
+ * Update profile quota usage
+ */
+async function updateProfileQuota(youtubeAccountId) {
+  try {
+    const account = await YouTubeAccountModel.findById(youtubeAccountId);
+    if (!account || !account.google.profileId) {
+      console.warn(`Account ${youtubeAccountId} or associated profile not found`);
+      return;
+    }
+
+    const profile = await ApiProfile.findById(account.google.profileId);
+    if (!profile) {
+      console.warn(`Profile ${account.google.profileId} not found`);
+      return;
+    }
+
+    profile.usedQuota += 50;
+    await profile.save();
+    console.log(`Profile ${profile._id} usedQuota updated. New value: ${profile.usedQuota}`);
+  } catch (error) {
+    console.error('Error updating profile quota:', error);
+  }
+}
+
+/**
+ * Calculate interval in milliseconds
+ */
 function calculateIntervalMs(interval) {
   const value = interval.value;
   switch (interval.unit) {
@@ -882,15 +790,60 @@ function calculateIntervalMs(interval) {
   }
 }
 
-// Immediate comments processor
+/**
+ * Schedule daily quota reset
+ */
+function scheduleQuotaReset() {
+  cron.schedule('0 0 * * *', async () => {
+    try {
+      const [updatedYT, updatedAPI, updatedSchedules] = await Promise.all([
+        YouTubeAccountModel.updateMany({}, { $set: { status: 'active' } }),
+        ApiProfile.updateMany({}, { $set: { usedQuota: 0, status: 'not exceeded', exceededAt: null } }),
+        ScheduleModel.updateMany({}, { $set: { status: 'active' } })
+      ]);
+
+      console.log(
+        `Quota reset complete at ${new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })}: ` +
+        `${updatedYT.modifiedCount} YT accounts, ` +
+        `${updatedAPI.modifiedCount} API profiles, ` +
+        `${updatedSchedules.modifiedCount} schedules updated.`
+      );
+    } catch (error) {
+      console.error('Error during daily quota reset:', error);
+    }
+  }, { timezone: 'America/Los_Angeles' });
+
+  console.log('Daily quota reset cron job scheduled for 00:00 PT.');
+}
+
+/**
+ * Schedule frequent status reset (every 15 seconds)
+ */
+function scheduleFrequentStatusReset() {
+  cron.schedule('*/15 * * * * *', async () => {
+    try {
+      const [updatedYT, updatedSchedules] = await Promise.all([
+        YouTubeAccountModel.updateMany({}, { $set: { status: 'active' } }),
+        ScheduleModel.updateMany({}, { $set: { status: 'active' } })
+      ]);
+
+      console.log(`[${new Date().toISOString()}] Frequent reset: ${updatedYT.modifiedCount} YouTube accounts, ${updatedSchedules.modifiedCount} schedules updated.`);
+    } catch (error) {
+      console.error('Error during frequent status reset:', error);
+    }
+  }, { timezone: 'America/Los_Angeles' });
+}
+
+/**
+ * Setup immediate comments processor
+ */
 function setupImmediateCommentsProcessor() {
   const job = cron.schedule('* * * * *', async () => {
     try {
       const pendingComments = await CommentModel.find({
         status: 'pending',
         scheduledFor: null
-      }).populate('youtubeAccount').limit(50); // Increased limit
-      console.log('helllllllo imediate');
+      }).populate('youtubeAccount').limit(50);
       
       await Promise.all(pendingComments.map(async (comment) => {
         if (!comment.youtubeAccount || comment.youtubeAccount.status !== 'active') {
@@ -916,29 +869,38 @@ function setupImmediateCommentsProcessor() {
   activeJobs.set('immediate-processor', job);
 }
 
-// Queue monitoring
+/**
+ * Setup queue monitoring
+ */
 function setupQueueMonitoring() {
-  const scheduleQueueEvents = new QueueEvents('schedule-processing', {
-    connection: { 
-      host: process.env.REDIS_HOST || 'localhost',
-      port: process.env.REDIS_PORT || 6379,
-      username: 'default',
-    password: process.env.REDIS_PASSWORD,
-    tls:{}
+// Add this when creating your queue
+const scheduleQueue = new Queue('schedule-processing', {
+  connection: {
+    ...REDIS_CONFIG,
+    retryStrategy: (times) => {
+      console.log(`Redis connection attempt ${times}`);
+      return Math.min(times * 100, 5000);
     }
-  });
+  }
+});
+
+scheduleQueue.on('error', (err) => {
+  console.error('Queue error:', err);
+});
+
+scheduleQueue.on('ioredis:close', () => {
+  console.log('Redis connection closed');
+});
+
+scheduleQueue.on('waiting', (jobId) => {
+  console.log(`Job ${jobId} is waiting`);
+});
   
   const commentQueueEvents = new QueueEvents('comment-posting', {
-    connection: { 
-      host: process.env.REDIS_HOST || 'localhost',
-      port: process.env.REDIS_PORT || 6379,
-      username: 'default',
-      password: process.env.REDIS_PASSWORD,
-      tls:{}
-    }
+    connection: REDIS_CONFIG
   });
   
-  scheduleQueueEvents.on('stalled', ({ jobId }) => {
+  scheduleQueue.on('stalled', ({ jobId }) => {
     console.warn(`Schedule job ${jobId} is stalled`);
   });
   
@@ -947,7 +909,9 @@ function setupQueueMonitoring() {
   });
 }
 
-// Maintenance job
+/**
+ * Setup maintenance job
+ */
 function setupMaintenanceJob() {
   const job = cron.schedule('*/30 * * * *', async () => {
     try {
@@ -981,33 +945,66 @@ function setupMaintenanceJob() {
   activeJobs.set('maintenance', job);
 }
 
-// Profile quota management
-async function updateProfileQuota(youtubeAccountId) {
+
+function setupMaintenanceSheduler() {
+  const job = cron.schedule('*/30 * * * *', async () => {
+    try {
+      console.log("Running maintenance scheduler...");
+
+      // Fetch all schedules
+      const schedules = await ScheduleModel.find({}).exec();
+
+      for (const schedule of schedules) {
+        const { _id, progress } = schedule;
+
+        // Count actual comments in the database
+        const [postedCount, failedCount, totalCount] = await Promise.all([
+          CommentModel.countDocuments({ scheduleId: _id, status: 'posted' }),
+          CommentModel.countDocuments({ scheduleId: _id, status: 'failed' }),
+          CommentModel.countDocuments({ scheduleId: _id }),
+        ]);
+
+        const expectedTotal = postedCount + failedCount;
+
+        // If mismatch, update the progress field
+        if (progress.totalComments !== totalCount ||
+            progress.postedComments !== postedCount ||
+            progress.failedComments !== failedCount) {
+          console.log(`Fixing progress for schedule ${_id}`);
+
+          schedule.progress = {
+            totalComments: totalCount,
+            postedComments: postedCount,
+            failedComments: failedCount,
+          };
+
+          await schedule.save();
+        }
+      }
+
+    } catch (error) {
+      console.error('Maintenance job failed:', error);
+    }
+  });
+
+  activeJobs.set('maintenance', job);
+}
+
+/**
+ * Reset Redis data
+ */
+async function resetRedis() {
   try {
-    const account = await YouTubeAccountModel.findById(youtubeAccountId);
-    if (!account || !account.google.profileId) {
-      console.warn(`Account ${youtubeAccountId} or associated profile not found`);
-      return;
-    }
-
-    const profile = await ApiProfile.findById(account.google.profileId);
-    if (!profile) {
-      console.warn(`Profile ${account.google.profileId} not found`);
-      return;
-    }
-
-    // Increment the usedQuota by 50
-    profile.usedQuota += 50;
-    await profile.save();
-
-    console.log(`Profile ${profile._id} usedQuota updated. New value: ${profile.usedQuota}`);
+    await redisClient.flushAll();
+    console.log('Redis has been reset.');
   } catch (error) {
-    console.error('Error updating profile quota:', error);
+    console.error('Error resetting Redis:', error);
   }
 }
 
-
-// Graceful shutdown
+/**
+ * Graceful shutdown
+ */
 async function shutdown() {
   try {
     console.log('Gracefully shutting down scheduler service...');
@@ -1037,28 +1034,14 @@ async function shutdown() {
   }
 }
 
-// Clean scheduler data
-async function cleanSchedulerData() {
-  try {
-    const keys = await redisClient.keys('*');
-    if (keys.length > 0) {
-      await redisClient.del(keys);
-    }
-    console.log(`Cleaned ${keys.length} Redis keys`);
-    return true;
-  } catch (error) {
-    console.error('Error cleaning Redis:', error);
-    return false;
-  }
-}
-
 module.exports = {
   setupScheduler,
   setupScheduleJob,
   setupMaintenanceJob,
   processSchedule: optimizedProcessSchedule,
-  cleanSchedulerData,
   scheduleQuotaReset,
   scheduleFrequentStatusReset,
+  setupMaintenanceSheduler,
+  resetRedis,
   shutdown
 };

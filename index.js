@@ -16,7 +16,7 @@ const schedulerRoutes = require('./routes/scheduler.routes');
 const apiProfilesRoutes = require('./routes/apiProfiles.routes');
 require('./cron/resetQuota');
 // Import services
-const { setupScheduler, shutdown, scheduleQuotaReset, scheduleFrequentStatusReset, setupMaintenanceJob } = require('./services/scheduler.service');
+const { setupScheduler, shutdown, scheduleQuotaReset, scheduleFrequentStatusReset, setupMaintenanceJob, resetRedis } = require('./services/scheduler.service');
 const { setupPassport } = require('./config/passport.config');
 
 // Initialize express app
