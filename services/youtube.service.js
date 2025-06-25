@@ -140,6 +140,7 @@ async function getAvailableAccount(scheduleId, excludeAccountId = null) {
 
 async function postComment(commentId) {
   let lockedAccount = null;
+
   try {
     const comment = await CommentModel.findById(commentId)
       .populate({
@@ -165,17 +166,29 @@ async function postComment(commentId) {
     // Load schedule to get lastPreviousAccountPosted and save it later
     const schedule = await ScheduleModel.findById(scheduleId).exec();
 
-    // If the comment's lastPreviousAccountPosted is set, prefer that,
-    // else fallback to the schedule's saved lastPreviousAccountPosted
+    // Determine last used account id from comment or schedule
     const lastUsedAccountId = comment.lastPreviousAccountPosted || schedule?.lastPreviousAccountPosted;
 
-    // Function to find available account excluding last used
-    async function findAvailableAccount(excludeAccountId) {
-      return await YouTubeAccountModel.findOne({
-        _id: { $ne: excludeAccountId },
+    // Improved function to find available account with better rotation
+    async function findAvailableAccount(lastUsedId, scheduleId) {
+      // Get all active accounts not locked for this schedule
+      const availableAccounts = await YouTubeAccountModel.find({
         status: "active",
         postingSchedules: { $ne: scheduleId },
       }).populate("proxy");
+
+      if (availableAccounts.length === 0) return null;
+
+      // Filter out last used account if possible
+      const filtered = availableAccounts.filter(acc => acc._id.toString() !== lastUsedId?.toString());
+
+      if (filtered.length > 0) {
+        // Pick one randomly from filtered accounts
+        return filtered[Math.floor(Math.random() * filtered.length)];
+      } else {
+        // No alternative, fallback to last used if available
+        return availableAccounts.find(acc => acc._id.toString() === lastUsedId?.toString()) || null;
+      }
     }
 
     // Check if current account is locked for schedule
@@ -185,11 +198,11 @@ async function postComment(commentId) {
     });
 
     if (isAccountLocked) {
-      // Try to find an alternative account excluding last used
-      const alternativeAccount = await findAvailableAccount(lastUsedAccountId);
+      // Try to find alternative account excluding last used
+      const alternativeAccount = await findAvailableAccount(lastUsedAccountId, scheduleId);
 
       if (!alternativeAccount) {
-        // No alternative available, delay comment for retry
+        // No available accounts, delay comment retry
         comment.status = "scheduled";
         comment.scheduledFor = new Date(Date.now() + 1000 * 60 * 2);
         await comment.save();
@@ -201,7 +214,7 @@ async function postComment(commentId) {
         };
       }
 
-      // Update comment's youtubeAccount to alternative and update `account` variable
+      // Update comment's youtubeAccount to alternative account and assign to `account`
       comment.youtubeAccount = alternativeAccount._id;
       await comment.save();
       account = alternativeAccount;
@@ -218,7 +231,7 @@ async function postComment(commentId) {
       throw new Error('Failed to lock account for this schedule.');
     }
 
-    // Posting logic
+    // Proceed with posting logic
     const oauth2Client = await refreshTokenIfNeeded(lockedAccount);
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
 
@@ -286,7 +299,7 @@ async function postComment(commentId) {
     comment.lastPreviousAccountPosted = lockedAccount._id;
     await comment.save();
 
-    // Save lastPreviousAccountPosted in schedule for next use
+    // Save lastPreviousAccountPosted in schedule for better rotation tracking
     schedule.lastPreviousAccountPosted = lockedAccount._id;
     await schedule.save();
 
