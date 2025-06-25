@@ -150,7 +150,7 @@ async function postComment(commentId) {
 
     if (!comment) throw new Error("Comment not found");
 
-    const account = comment.youtubeAccount;
+    let account = comment.youtubeAccount;
     if (!account || account.status === null) {
       await comment.deleteOne();
       return { success: false, message: 'Comment deleted due to invalid account or status' };
@@ -162,26 +162,52 @@ async function postComment(commentId) {
 
     const scheduleId = comment.scheduleId;
 
-    // 🔒 Check if account is already locked for this schedule
+    // Load schedule to get lastPreviousAccountPosted and save it later
+    const schedule = await ScheduleModel.findById(scheduleId).exec();
+
+    // If the comment's lastPreviousAccountPosted is set, prefer that,
+    // else fallback to the schedule's saved lastPreviousAccountPosted
+    const lastUsedAccountId = comment.lastPreviousAccountPosted || schedule?.lastPreviousAccountPosted;
+
+    // Function to find available account excluding last used
+    async function findAvailableAccount(excludeAccountId) {
+      return await YouTubeAccountModel.findOne({
+        _id: { $ne: excludeAccountId },
+        status: "active",
+        postingSchedules: { $ne: scheduleId },
+      }).populate("proxy");
+    }
+
+    // Check if current account is locked for schedule
     const isAccountLocked = await YouTubeAccountModel.findOne({
       _id: account._id,
       postingSchedules: scheduleId,
     });
 
     if (isAccountLocked) {
-      // 🚩 Delay the comment
-      comment.status = "scheduled";
-      comment.scheduledFor = new Date(Date.now() + 1000 * 60 * 2); // Delay for 2 mins
-      await comment.save();
+      // Try to find an alternative account excluding last used
+      const alternativeAccount = await findAvailableAccount(lastUsedAccountId);
 
-      console.log(`Account ${account._id} is busy for schedule ${scheduleId}. Comment delayed.`);
-      return {
-        success: false,
-        message: 'Account is currently posting for this schedule. Comment delayed for retry.',
-      };
+      if (!alternativeAccount) {
+        // No alternative available, delay comment for retry
+        comment.status = "scheduled";
+        comment.scheduledFor = new Date(Date.now() + 1000 * 60 * 2);
+        await comment.save();
+
+        console.log(`No available accounts for schedule ${scheduleId}. Comment delayed.`);
+        return {
+          success: false,
+          message: 'No available accounts. Comment delayed for retry.',
+        };
+      }
+
+      // Update comment's youtubeAccount to alternative and update `account` variable
+      comment.youtubeAccount = alternativeAccount._id;
+      await comment.save();
+      account = alternativeAccount;
     }
 
-    // 🔐 Lock the account for this schedule
+    // Lock the account for this schedule
     lockedAccount = await YouTubeAccountModel.findOneAndUpdate(
       { _id: account._id, postingSchedules: { $ne: scheduleId } },
       { $addToSet: { postingSchedules: scheduleId } },
@@ -192,15 +218,11 @@ async function postComment(commentId) {
       throw new Error('Failed to lock account for this schedule.');
     }
 
-    // ✅ Proceed with posting logic
+    // Posting logic
     const oauth2Client = await refreshTokenIfNeeded(lockedAccount);
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
 
-    const schedule = await ScheduleModel.findById(scheduleId).exec();
     const includeEmojis = schedule?.includeEmojis === true;
-
-    console.log('account', account);
-    console.log("lockedAccount", lockedAccount);
 
     const proxy = lockedAccount.proxy;
     let agent;
@@ -257,12 +279,16 @@ async function postComment(commentId) {
 
     await updateDailyUsage(lockedAccount._id, "commentCount");
 
-    // ✅ Update comment info
+    // Update comment info
     comment.status = 'posted';
     comment.commentId = youtubeCommentId;
     comment.postedAt = new Date();
     comment.lastPreviousAccountPosted = lockedAccount._id;
     await comment.save();
+
+    // Save lastPreviousAccountPosted in schedule for next use
+    schedule.lastPreviousAccountPosted = lockedAccount._id;
+    await schedule.save();
 
     return {
       success: true,
@@ -288,23 +314,20 @@ async function postComment(commentId) {
       success: false,
       error: error.message || "Failed to post comment",
     };
+
   } finally {
-      const comment = await CommentModel.findById(commentId)
-      .populate({
-        path: "youtubeAccount",
-        populate: { path: "proxy" },
-      })
-      .exec();
     if (lockedAccount) {
-      // 🔓 Release the lock for this schedule
-      await YouTubeAccountModel.updateOne(
-        { _id: lockedAccount._id },
-        { $pull: { postingSchedules: comment.scheduleId } }
-      );
+      // Reload comment to get updated scheduleId (in case it changed)
+      const comment = await CommentModel.findById(commentId).exec();
+      if (comment) {
+        await YouTubeAccountModel.updateOne(
+          { _id: lockedAccount._id },
+          { $pull: { postingSchedules: comment.scheduleId } }
+        );
+      }
     }
   }
 }
-
 
 /**
  * Update daily usage counter for a YouTube account

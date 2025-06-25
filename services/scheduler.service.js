@@ -338,7 +338,7 @@ scheduleWorker.on('failed', (job, err) => {
   
       const quotaExceeded = result.error?.includes("quota") || result.error?.includes("dailyLimitExceeded");
       const proxyError = result.error?.includes("proxy") || result.error?.includes("invalid proxy") || result.error === "invalid proxy";
-      const duplication= result.message?.includes("Account is currently posting for this schedule. Comment delayed for retry") || result.error?.includes("Account is currently posting for this schedule. Comment delayed for retry")
+      const duplication= result.message?.includes("No available accounts. Comment delayed for retry.") || result.error?.includes("Comment delayed for retry")
       console.log("result.error",result.message);
       const updateProgress = result.success
         ? { $inc: { 'progress.postedComments': 1 } }

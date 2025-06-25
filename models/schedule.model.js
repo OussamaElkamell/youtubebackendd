@@ -111,7 +111,12 @@ const ScheduleSchema = new mongoose.Schema({
   includeEmojis:{
     type:Boolean,
 
-  }
+  },
+   lastPreviousAccountPosted: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'YouTubeAccount',
+    default: null,
+  },
 });
 
 const ScheduleModel = mongoose.model('Schedule', ScheduleSchema);
