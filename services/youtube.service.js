@@ -168,39 +168,18 @@ async function postComment(commentId) {
       postingSchedules: scheduleId,
     });
 
-if (isAccountLocked) {
-  console.log(`Account ${account._id} is busy for schedule ${scheduleId}. Searching for another account.`);
+    if (isAccountLocked) {
+      // 🚩 Delay the comment
+      comment.status = "scheduled";
+      comment.scheduledFor = new Date(Date.now() + 1000 * 60 * 2); // Delay for 2 mins
+      await comment.save();
 
-  // Find another available YouTube account for the same user and same schedule
-  const alternativeAccount = await YouTubeAccountModel.findOne({
-    _id: { $ne: account._id }, // Not the current busy account
-    status: 'active',
-    postingSchedules: { $ne: scheduleId }, // Not locked for this schedule
-    user: comment.user // Optional: filter by the same user if needed
-  }).populate("proxy");
-
-  if (!alternativeAccount) {
-    console.log(`No available accounts for schedule ${scheduleId}. Keeping as pending.`);
-
-    comment.status = "pending";
-    await comment.save();
-
-    return {
-      success: false,
-      message: 'No available accounts at the moment. Comment stays pending.',
-    };
-  }
-
-  // ✅ Update the comment with the new available account
-  comment.youtubeAccount = alternativeAccount._id;
-  await comment.save();
-
-  console.log(`Switched to alternative account ${alternativeAccount._id} for comment ${comment._id}.`);
-
-  // 🔥 Now proceed with the process using the alternative account
-  account = alternativeAccount;
-}
-
+      console.log(`Account ${account._id} is busy for schedule ${scheduleId}. Comment delayed.`);
+      return {
+        success: false,
+        message: 'Account is currently posting for this schedule. Comment delayed for retry.',
+      };
+    }
 
     // 🔐 Lock the account for this schedule
     lockedAccount = await YouTubeAccountModel.findOneAndUpdate(
