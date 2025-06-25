@@ -3,7 +3,7 @@ const { google } = require('googleapis');
 const { OAuth2Client } = require('google-auth-library');
 const { YouTubeAccountModel } = require('../models/youtube-account.model');
 const { CommentModel } = require('../models/comment.model');
-
+const mongoose = require('mongoose');
 const { createProxyAgent } = require('./proxy.service');
 const axios = require('axios');
 
@@ -220,9 +220,11 @@ async function postComment(commentId) {
       account = alternativeAccount;
     }
 
+const scheduleObjectId = new mongoose.Types.ObjectId(scheduleId);
+
     // Lock the account for this schedule
     lockedAccount = await YouTubeAccountModel.findOneAndUpdate(
-      { _id: account._id, postingSchedules: { $ne: scheduleId } },
+      { _id: account._id, postingSchedules: { $ne:scheduleObjectId } },
       { $addToSet: { postingSchedules: scheduleId } },
       { new: true }
     ).populate("proxy");
