@@ -117,53 +117,113 @@ function generateRandomString(length) {
   }
   return result;
 }
+async function getAvailableAccount(scheduleId, excludeAccountId = null) {
+  const filter = {
+    status: 'active',
+    isPosting: { $ne: true },
+  };
 
-/**
- * Post a comment to YouTube
- * @param {String} commentId MongoDB ID of the comment
- */
+  // Optional: filter by schedule if needed
+  if (scheduleId) filter.scheduleId = scheduleId;
+
+  // Exclude the last used account
+  if (excludeAccountId) filter._id = { $ne: excludeAccountId };
+
+  const account = await YouTubeAccountModel.findOneAndUpdate(
+    filter,
+    { $set: { isPosting: true } },
+    { new: true }
+  );
+
+  return account;
+}
+
 async function postComment(commentId) {
+  let lockedAccount = null;
   try {
-
-    // Get comment from database and populate the YouTube account with proxy details
     const comment = await CommentModel.findById(commentId)
-    .populate({
-      path: "youtubeAccount",
-      populate: { path: "proxy" },
-    })
-    .exec();
-  
+      .populate({
+        path: "youtubeAccount",
+        populate: { path: "proxy" },
+      })
+      .exec();
 
-    if (!comment) {
-      throw new Error("Comment not found");
-    }
+    if (!comment) throw new Error("Comment not found");
 
     const account = comment.youtubeAccount;
-    if (!account || account.status === null || account.youtubeAccount === null) {
-      console.warn('Account status or youtubeAccount is null, deleting comment...');
+    if (!account || account.status === null) {
       await comment.deleteOne();
-
-      return {
-        success: false,
-        message: 'Comment deleted due to invalid account or status',
-      };
+      return { success: false, message: 'Comment deleted due to invalid account or status' };
     }
 
-    // Check account status
     if (account.status !== "active") {
-      console.warn(`YouTube account is not active: ${account.status}`);
       throw new Error(`YouTube account is ${account.status}`);
     }
 
-    // Refresh token if needed
-    const oauth2Client = await refreshTokenIfNeeded(account);
+    const scheduleId = comment.scheduleId;
+
+    // 🔒 Check if account is already locked for this schedule
+    const isAccountLocked = await YouTubeAccountModel.findOne({
+      _id: account._id,
+      postingSchedules: scheduleId,
+    });
+
+if (isAccountLocked) {
+  console.log(`Account ${account._id} is busy for schedule ${scheduleId}. Searching for another account.`);
+
+  // Find another available YouTube account for the same user and same schedule
+  const alternativeAccount = await YouTubeAccountModel.findOne({
+    _id: { $ne: account._id }, // Not the current busy account
+    status: 'active',
+    postingSchedules: { $ne: scheduleId }, // Not locked for this schedule
+    user: comment.user // Optional: filter by the same user if needed
+  }).populate("proxy");
+
+  if (!alternativeAccount) {
+    console.log(`No available accounts for schedule ${scheduleId}. Keeping as pending.`);
+
+    comment.status = "pending";
+    await comment.save();
+
+    return {
+      success: false,
+      message: 'No available accounts at the moment. Comment stays pending.',
+    };
+  }
+
+  // ✅ Update the comment with the new available account
+  comment.youtubeAccount = alternativeAccount._id;
+  await comment.save();
+
+  console.log(`Switched to alternative account ${alternativeAccount._id} for comment ${comment._id}.`);
+
+  // 🔥 Now proceed with the process using the alternative account
+  account = alternativeAccount;
+}
+
+
+    // 🔐 Lock the account for this schedule
+    lockedAccount = await YouTubeAccountModel.findOneAndUpdate(
+      { _id: account._id, postingSchedules: { $ne: scheduleId } },
+      { $addToSet: { postingSchedules: scheduleId } },
+      { new: true }
+    ).populate("proxy");
+
+    if (!lockedAccount) {
+      throw new Error('Failed to lock account for this schedule.');
+    }
+
+    // ✅ Proceed with posting logic
+    const oauth2Client = await refreshTokenIfNeeded(lockedAccount);
     const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-const schedule = await ScheduleModel.findById(comment.scheduleId).exec();
+
+    const schedule = await ScheduleModel.findById(scheduleId).exec();
     const includeEmojis = schedule?.includeEmojis === true;
-    // Fetch and create the proxy agent if available
-    console.log('includeEmojissssssssssssssssssssssss',includeEmojis);
-    
-    const proxy = account.proxy;
+
+    console.log('account', account);
+    console.log("lockedAccount", lockedAccount);
+
+    const proxy = lockedAccount.proxy;
     let agent;
     if (proxy) {
       try {
@@ -174,25 +234,22 @@ const schedule = await ScheduleModel.findById(comment.scheduleId).exec();
         });
       } catch (proxyError) {
         console.warn("Proxy failed, trying direct connection");
-    
       }
-    } else {
-      console.warn('No proxy found for this YouTube account');
     }
 
     if (!comment.content || comment.content.trim() === '') {
       throw new Error("Comment content is empty");
     }
+
     let sanitizedContent = comment.content.trim();
     if (includeEmojis) {
       sanitizedContent = addRandomEmojis(sanitizedContent);
     }
     sanitizedContent = randomizeSiParamInYoutubeUrl(sanitizedContent);
+
     if (!sanitizedContent) {
       throw new Error("Comment content is empty after trimming");
     }
-    
-
 
     const commentData = {
       snippet: {
@@ -205,54 +262,46 @@ const schedule = await ScheduleModel.findById(comment.scheduleId).exec();
       },
     };
 
-    // Add parent ID for replies if available
     if (comment.parentId) {
       commentData.snippet.parentId = comment.parentId;
-      console.log("Posting a reply to parentId:", comment.parentId);
+      console.log("Posting reply to parentId:", comment.parentId);
     } else {
-      console.log("Posting a top-level comment to videoId:", comment.videoId);
+      console.log("Posting top-level comment to videoId:", comment.videoId);
     }
-if (agent){
-    // Post the comment using YouTube API
+
     const response = await youtube.commentThreads.insert({
       part: "snippet",
       requestBody: commentData,
     });
 
-    // Update comment with ID from YouTube
-    const commentThread = response.data;
-    const youtubeCommentId = commentThread.id;
-  
-    await updateDailyUsage(account._id, "commentCount");
+    const youtubeCommentId = response.data.id;
 
- 
+    await updateDailyUsage(lockedAccount._id, "commentCount");
+
+    // ✅ Update comment info
+    comment.status = 'posted';
+    comment.commentId = youtubeCommentId;
+    comment.postedAt = new Date();
+    comment.lastPreviousAccountPosted = lockedAccount._id;
+    await comment.save();
+
     return {
       success: true,
       commentId: youtubeCommentId,
       message: "Comment posted successfully",
-    };}else {
-      return {
-        success: false,
-        message: "invalid proxy",
-        error:"invalid proxy" 
-      }
-    }
-  } catch (error) {
-  
+    };
 
-    // Check for quota exceeded error
+  } catch (error) {
+    console.error("Error posting comment:", error);
+
     if (
       error.message.includes("quotaExceeded") ||
       error.message.includes("dailyLimitExceeded")
     ) {
-      console.warn("Quota exceeded or daily limit reached. Updating account status...");
-      try {
-        const account = comment.youtubeAccount;
-        account.status = "limited";
-        await account.save();
-        console.log("Account status updated to 'limited'.");
-      } catch (updateError) {
-        console.error("Error updating account status:", updateError);
+      console.warn("Quota exceeded. Marking account as 'limited'.");
+      if (lockedAccount) {
+        lockedAccount.status = "limited";
+        await lockedAccount.save();
       }
     }
 
@@ -260,8 +309,23 @@ if (agent){
       success: false,
       error: error.message || "Failed to post comment",
     };
+  } finally {
+      const comment = await CommentModel.findById(commentId)
+      .populate({
+        path: "youtubeAccount",
+        populate: { path: "proxy" },
+      })
+      .exec();
+    if (lockedAccount) {
+      // 🔓 Release the lock for this schedule
+      await YouTubeAccountModel.updateOne(
+        { _id: lockedAccount._id },
+        { $pull: { postingSchedules: comment.scheduleId } }
+      );
+    }
   }
 }
+
 
 /**
  * Update daily usage counter for a YouTube account
@@ -304,6 +368,7 @@ async function updateDailyUsage(accountId, type) {
     console.error('Error updating daily usage:', error);
     return false;
   }
+  
 }
 
 /**

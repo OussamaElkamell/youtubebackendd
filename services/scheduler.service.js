@@ -113,7 +113,7 @@ async function setupScheduler() {
     setupMaintenanceSheduler()
     scheduleQuotaReset();
     // scheduleFrequentStatusReset();
-    
+    resetRedis()
     console.log('Optimized scheduler setup complete');
     return true;
   } catch (error) {
@@ -338,7 +338,8 @@ scheduleWorker.on('failed', (job, err) => {
   
       const quotaExceeded = result.error?.includes("quota") || result.error?.includes("dailyLimitExceeded");
       const proxyError = result.error?.includes("proxy") || result.error?.includes("invalid proxy") || result.error === "invalid proxy";
-  
+      const duplication= result.message?.includes("No available accounts at the moment. Comment stays pending") || result.error?.includes("No available accounts at the moment. Comment stays pending")
+      console.log("result.error",result.message);
       const updateProgress = result.success
         ? { $inc: { 'progress.postedComments': 1 } }
         : { $inc: { 'progress.failedComments': 1 } };
@@ -346,7 +347,7 @@ scheduleWorker.on('failed', (job, err) => {
       await ScheduleModel.updateOne({ _id: scheduleId }, updateProgress);
   
       let updateFields = {
-        lastMessage: result.success ? 'Comment posted successfully' : result.error || 'Unknown error',
+        lastMessage: result.success ? 'Comment posted successfully' : result.message || result.error|| 'Unknown error',
       };
   
       if (result.success) {
@@ -361,6 +362,11 @@ scheduleWorker.on('failed', (job, err) => {
         const newCount = (currentAccount?.proxyErrorCount || 0) + 1;
         updateFields.proxyErrorCount = newCount;
         updateFields.status = newCount >= 3 ? 'inactive' : 'active';
+          } else if (duplication) {
+        const currentAccount = await YouTubeAccountModel.findById(comment.youtubeAccount._id);
+        const newCount = (currentAccount?.duplicationCount || 0) + 1;
+        updateFields.duplicationCount = newCount;
+        updateFields.status = 'active';
       } else {
         updateFields.proxyErrorCount = 0;
         updateFields.status = 'inactive';

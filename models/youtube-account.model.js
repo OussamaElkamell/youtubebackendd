@@ -78,7 +78,16 @@ const YouTubeAccountSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   },
+  isPosting: {
+  type: Boolean,
+  default: false
+},
   proxyErrorCount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  duplicationCount:{
     type: Number,
     default: 0,
     min: 0
@@ -86,7 +95,9 @@ const YouTubeAccountSchema = new mongoose.Schema({
   proxyErrorThreshold: {
     type: Number,
     default: 3
-  }
+  },
+  postingSchedules: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Schedule' }],
+
 }, {
   timestamps: true, // Adds createdAt and updatedAt automatically
 });

@@ -39,6 +39,12 @@ const CommentSchema = new mongoose.Schema({
     default: 0
   },
   commentId: String, // YouTube's ID for the posted comment
+  lastPreviousAccountPosted: {
+  type: mongoose.Schema.Types.ObjectId,
+  ref: 'YouTubeAccount',
+  default: null,
+},
+
   createdAt: {
     type: Date,
     default: Date.now
