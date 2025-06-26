@@ -385,7 +385,7 @@ scheduleWorker.on('failed', (job, err) => {
         const currentAccount = await YouTubeAccountModel.findById(comment.youtubeAccount._id);
         const newCount = (currentAccount?.proxyErrorCount || 0) + 1;
         updateFields.proxyErrorCount = newCount;
-        updateFields.status = newCount >= 3 ? 'inactive' : 'active';
+        updateFields.status = newCount >= 10 ? 'inactive' : 'active';
           } else if (duplication) {
         const currentAccount = await YouTubeAccountModel.findById(comment.youtubeAccount._id);
         const newCount = (currentAccount?.duplicationCount || 0) + 1;
