@@ -659,28 +659,39 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     console.log(`[Schedule ${schedule._id}] Skipping comment creation - delay of ${schedule.delays.delayofsleep} minutes active`);
     return;
   }
-  const filteredAccounts = schedule.lastUsedAccount
-    ? accounts.filter(acc => acc._id.toString() !== schedule.lastUsedAccount.toString())
-    : accounts;
+
+  // Initialize comments array
+  const comments = [];
+
+  // Start with the current last used account in the DB
+  let lastUsed = schedule.lastUsedAccount?.toString() || null;
+
+  // Exclude lastUsedAccount initially
+  let filteredAccounts = accounts.filter(acc => acc._id.toString() !== lastUsed);
 
   if (filteredAccounts.length === 0) {
     console.log(`[Schedule ${schedule._id}] No available accounts after excluding lastUsedAccount`);
-    // Optionally handle resetting lastUsedAccount or fallback logic here
     return;
   }
-  const comments = filteredAccounts.map(account => {
+
+  for (const account of filteredAccounts) {
     const randomVideo = targetVideos[Math.floor(Math.random() * targetVideos.length)];
-    
-    return {
+
+    const comment = {
       user: schedule.user,
       youtubeAccount: account._id,
       videoId: randomVideo.videoId,
       scheduleId: schedule._id,
       content: getRandomTemplate(schedule.commentTemplates),
       status: 'pending',
-      metadata: { scheduleId: schedule._id }
+      metadata: { scheduleId: schedule._id },
     };
-  });
+
+    comments.push(comment);
+
+    // Update last used for next iteration
+    lastUsed = account._id.toString();
+  }
 
   const [createdComments] = await Promise.all([
     CommentModel.insertMany(comments),
@@ -690,8 +701,11 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     ),
     ScheduleModel.updateOne(
       { _id: schedule._id },
-      { $inc: { 'progress.totalComments': comments.length } }
-    )
+      {
+        $inc: { 'progress.totalComments': comments.length },
+        $set: { lastUsedAccount: lastUsed }, //<-- ✅ Update the last used account in ScheduleModel
+      }
+    ),
   ]);
 
   const jobs = createdComments.map(comment => ({
@@ -700,13 +714,14 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     opts: {
       delay: calculateOptimizedDelay(schedule.delays),
       attempts: 3,
-      backoff: { type: 'exponential', delay: 3000 }
-    }
+      backoff: { type: 'exponential', delay: 3000 },
+    },
   }));
 
   console.log(`Queuing ${jobs.length} comments with random video selection`);
   await commentQueue.addBulk(jobs);
 }
+
 
 /**
  * Get random comment template
