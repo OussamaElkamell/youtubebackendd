@@ -284,6 +284,30 @@ async function handleIntervalSchedule(schedule, scheduleId) {
     throw error;
   }
 }
+async function fetchNextComment(scheduleId) {
+  const now = new Date();
+  const schedule = await ScheduleModel.findById(scheduleId).exec();
+
+  const query = {
+    status: 'scheduled',
+    scheduledFor: { $lte: now },
+    scheduleId: scheduleId,
+  };
+
+  // 🔥 Filter out last used account
+  if (schedule?.lastUsedAccount) {
+    query.youtubeAccount = { $ne: schedule.lastUsedAccount };
+  }
+
+  const comment = await CommentModel.findOne(query)
+    .populate({
+      path: "youtubeAccount",
+      populate: { path: "proxy" },
+    })
+    .exec();
+
+  return comment;
+}
 
 /**
  * Setup workers for processing queues
@@ -635,8 +659,16 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     console.log(`[Schedule ${schedule._id}] Skipping comment creation - delay of ${schedule.delays.delayofsleep} minutes active`);
     return;
   }
+  const filteredAccounts = schedule.lastUsedAccount
+    ? accounts.filter(acc => acc._id.toString() !== schedule.lastUsedAccount.toString())
+    : accounts;
 
-  const comments = accounts.map(account => {
+  if (filteredAccounts.length === 0) {
+    console.log(`[Schedule ${schedule._id}] No available accounts after excluding lastUsedAccount`);
+    // Optionally handle resetting lastUsedAccount or fallback logic here
+    return;
+  }
+  const comments = filteredAccounts.map(account => {
     const randomVideo = targetVideos[Math.floor(Math.random() * targetVideos.length)];
     
     return {
@@ -697,6 +729,30 @@ async function getCommentWithRetry(commentId, maxAttempts = 3) {
     if (attempt < maxAttempts) await new Promise(r => setTimeout(r, attempt * 500));
   }
   return null;
+}
+async function fetchNextComment(scheduleId) {
+  const now = new Date();
+  const schedule = await ScheduleModel.findById(scheduleId).exec();
+
+  const query = {
+    status: 'scheduled',
+    scheduledFor: { $lte: now },
+    scheduleId: scheduleId,
+  };
+
+  // 🔥 Filter out last used account
+  if (schedule?.lastUsedAccount) {
+    query.youtubeAccount = { $ne: schedule.lastUsedAccount };
+  }
+
+  const comment = await CommentModel.findOne(query)
+    .populate({
+      path: "youtubeAccount",
+      populate: { path: "proxy" },
+    })
+    .exec();
+
+  return comment;
 }
 
 /**

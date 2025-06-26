@@ -112,11 +112,8 @@ const ScheduleSchema = new mongoose.Schema({
     type:Boolean,
 
   },
-   lastPreviousAccountPosted: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'YouTubeAccount',
-    default: null,
-  },
+lastUsedAccount: { type: mongoose.Schema.Types.ObjectId, ref: 'YoutubeAccount' }
+,
 });
 
 const ScheduleModel = mongoose.model('Schedule', ScheduleSchema);
