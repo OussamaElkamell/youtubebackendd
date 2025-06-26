@@ -665,9 +665,11 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
 
   // Start with the current last used account in the DB
   let lastUsed = schedule.lastUsedAccount?.toString() || null;
+console.log('lastuseed',lastUsed);
 
   // Exclude lastUsedAccount initially
   let filteredAccounts = accounts.filter(acc => acc._id.toString() !== lastUsed);
+console.log('filtered',filteredAccounts);
 
   if (filteredAccounts.length === 0) {
     console.log(`[Schedule ${schedule._id}] No available accounts after excluding lastUsedAccount`);
