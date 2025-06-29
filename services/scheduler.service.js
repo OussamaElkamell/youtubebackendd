@@ -22,7 +22,7 @@ host: process.env.REDIS_HOST || 'localhost',
 const QUEUE_CONFIG = {
   connection: REDIS_CONFIG,
   defaultJobOptions: {
-    attempts: 3,
+    attempts: 1,
     backoff: { type: 'exponential', delay: 3000 },
     removeOnComplete: true,
     removeOnFail: 1000
@@ -182,9 +182,9 @@ async function setupScheduleJob(scheduleId) {
             console.log('Check');
           activeJobs.set(scheduleId, {
             stop: async () => {
-              const jobs = await scheduleQueue.getRepeatableJobs();
+              const jobs = await scheduleQueue.getJobSchedulers();
               const job = jobs.find(j => j.id === jobId);
-              if (job) await scheduleQueue.removeRepeatableByKey(job.key);
+              if (job) await scheduleQueue.removeJobScheduler(job.key);
             }
           });
         }
@@ -201,24 +201,39 @@ async function setupScheduleJob(scheduleId) {
  * Handle interval schedule with delay logic
  */
 async function handleIntervalSchedule(schedule, scheduleId) {
-  if (!schedule.schedule.interval?.value > 0) return;
+  if (!(schedule.schedule.interval?.value > 0)) return;
 
   try {
     const currentSchedule = await ScheduleModel.findById(scheduleId).lean();
     if (!currentSchedule) return;
 
-    // Calculate interval
+    // ✅ 🔥 Stop if not active
+    if (currentSchedule.status !== 'active') {
+      console.log(`[Schedule ${scheduleId}] Not active. Skipping repeat job creation.`);
+
+      const jobId = `interval-${scheduleId}`;
+      const jobs = await scheduleQueue.getJobSchedulers();
+      const existingJob = jobs.find(j => j.id === jobId);
+      if (existingJob) {
+        await scheduleQueue.removeJobScheduler(existingJob.key);
+        console.log(`[Schedule ${scheduleId}] Removed existing repeat job because it's not active.`);
+      }
+
+      return;
+    }
+
+    // ✅ Calculate interval
     let intervalMs;
     const postedComments = currentSchedule.progress?.postedComments || 0;
     const limitComments = currentSchedule.delays?.limitComments || 0;
-    
+
     if (limitComments > 0 && postedComments % limitComments === 0 && postedComments > 0) {
       const minDelay = currentSchedule.delays.minDelay || 1;
       const maxDelay = currentSchedule.delays.maxDelay || 30;
       const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
       intervalMs = randomDelay * 60 * 1000;
       console.log(`[Schedule ${scheduleId}] Applying random delay of ${randomDelay} minutes`);
-      
+
       await ScheduleModel.updateOne(
         { _id: schedule._id },
         { 
@@ -228,14 +243,14 @@ async function handleIntervalSchedule(schedule, scheduleId) {
           } 
         }
       );
-      
-      // Remove any existing job
+
+      // Remove existing job if exists
       const jobId = `interval-${scheduleId}`;
-      const jobs = await scheduleQueue.getRepeatableJobs();
+      const jobs = await scheduleQueue.getJobSchedulers();
       const existingJob = jobs.find(j => j.id === jobId);
-      if (existingJob) await scheduleQueue.removeRepeatableByKey(existingJob.key);
-      
-      // Create new job with the updated delay
+      if (existingJob) await scheduleQueue.removeJobScheduler(existingJob.key);
+
+      // Create new job with updated delay
       await scheduleQueue.add('process-schedule', { scheduleId }, {
         repeat: { every: intervalMs },
         jobId,
@@ -246,8 +261,9 @@ async function handleIntervalSchedule(schedule, scheduleId) {
       return;
     }
 
-    // If no special delay is needed, use the normal interval
+    // ✅ If no special delay, use regular interval
     intervalMs = calculateIntervalMs(currentSchedule.schedule.interval);
+
     await ScheduleModel.updateOne(
       { _id: schedule._id },
       { 
@@ -258,12 +274,11 @@ async function handleIntervalSchedule(schedule, scheduleId) {
       }
     );
 
-    // Manage the job
     const jobId = `interval-${scheduleId}`;
-    const jobs = await scheduleQueue.getRepeatableJobs();
+    const jobs = await scheduleQueue.getJobSchedulers();
     const existingJob = jobs.find(j => j.id === jobId);
-    if (existingJob) await scheduleQueue.removeRepeatableByKey(existingJob.key);
-    
+    if (existingJob) await scheduleQueue.removeJobScheduler(existingJob.key);
+
     await scheduleQueue.add('process-schedule', { scheduleId }, {
       repeat: { every: intervalMs },
       jobId,
@@ -273,10 +288,16 @@ async function handleIntervalSchedule(schedule, scheduleId) {
 
     activeJobs.set(scheduleId, {
       stop: async () => {
-        const jobs = await scheduleQueue.getRepeatableJobs();
-        const job = jobs.find(j => j.id === jobId);
-        if (job) await scheduleQueue.removeRepeatableByKey(job.key);
-      }
+  const jobs = await scheduleQueue.getJobSchedulers();
+  const job = jobs.find(j => j.id === jobId);
+  if (job) {
+    await scheduleQueue.removeJobScheduler(job.key, {
+      groupKey: job.groupKey
+    });
+    console.log(`Removed repeat job ${job.key}`);
+  }
+}
+
     });
 
   } catch (error) {
@@ -284,6 +305,7 @@ async function handleIntervalSchedule(schedule, scheduleId) {
     throw error;
   }
 }
+
 async function fetchNextComment(scheduleId) {
   const now = new Date();
   const schedule = await ScheduleModel.findById(scheduleId).exec();
@@ -325,7 +347,12 @@ const scheduleWorker = new Worker('schedule-processing', async (job) => {
   }
 }, {
   connection: REDIS_CONFIG,
-  concurrency: 5
+  concurrency: 5,
+  settings: {
+      maxStalledCount: 0,
+      lockRenewTime: 30000,
+      stalledInterval: 0
+    }
 });
 
 scheduleWorker.on('completed', (job) => {
@@ -339,7 +366,7 @@ scheduleWorker.on('failed', (job, err) => {
   const commentWorker = new Worker('comment-posting', async (job) => {
     const { commentId, scheduleId } = job.data;
     console.log("hello");
-    
+
     try {
       const comment = await getCommentWithRetry(commentId);
       if (!comment) throw new Error(`Comment ${commentId} not found`);
@@ -666,6 +693,7 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
   // Start with the current last used account in the DB
   let lastUsed = schedule.lastUsedAccount?.toString() || null;
 console.log('lastuseed',lastUsed);
+console.log("accccounts",accounts);
 
   // Exclude lastUsedAccount initially
   let filteredAccounts = accounts.filter(acc => acc._id.toString() !== lastUsed);
@@ -673,7 +701,7 @@ console.log('filtered',filteredAccounts);
 
   if (filteredAccounts.length === 0) {
     console.log(`[Schedule ${schedule._id}] No available accounts after excluding lastUsedAccount`);
-    return;
+    filteredAccounts=accounts
   }
 
   for (const account of filteredAccounts) {
@@ -715,7 +743,7 @@ console.log('filtered',filteredAccounts);
     data: { commentId: comment._id, scheduleId: schedule._id },
     opts: {
       delay: calculateOptimizedDelay(schedule.delays),
-      attempts: 3,
+      attempts: 1,
       backoff: { type: 'exponential', delay: 3000 },
     },
   }));
@@ -936,7 +964,7 @@ function setupImmediateCommentsProcessor() {
         await commentQueue.add('post-immediate-comment', {
           commentId: comment._id.toString()
         }, {
-          attempts: 3,
+          attempts: 1,
           backoff: { type: 'exponential', delay: 3000 }
         });
       }));
@@ -992,7 +1020,7 @@ scheduleQueue.on('waiting', (jobId) => {
  * Setup maintenance job
  */
 function setupMaintenanceJob() {
-  const job = cron.schedule('*/30 * * * *', async () => {
+  const job = cron.schedule('*/15 * * * *', async () => {
     try {
       console.log('Running maintenance tasks...');
       
@@ -1000,19 +1028,20 @@ function setupMaintenanceJob() {
       const comments = await CommentModel.find({ status: 'pending' });
       const commentIds = comments.map(c => c._id.toString());
       
-      const jobs = await commentQueue.getJobs(['waiting', 'delayed']);
-      await Promise.all(jobs.map(async (job) => {
-        if (!commentIds.includes(job.data.commentId)) {
+
+      const jobs = await commentQueue.getJobs(['failed','waiting', 'delayed']);
+      for (const job of jobs) {
+        if (job.failedReason?.includes('Missing key for job')) {
           await job.remove();
         }
-      }));
-
+      }
+      
       // Clean completed/failed jobs
       await Promise.all([
-        commentQueue.clean(1000, 'completed'),
-        commentQueue.clean(1000, 'failed'),
-        scheduleQueue.clean(1000, 'completed'),
-        scheduleQueue.clean(1000, 'failed')
+        commentQueue.clean(0, 'completed'),
+        commentQueue.clean(0, 'failed'),
+        scheduleQueue.clean(0, 'completed'),
+        scheduleQueue.clean(0, 'failed')
       ]);
 
       console.log('Maintenance tasks completed');
