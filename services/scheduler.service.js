@@ -401,18 +401,22 @@ scheduleWorker.on('failed', (job, err) => {
       .populate('selectedAccounts', 'email channelTitle status')
       .lean();
 
-    const comments = await CommentModel.find({
-      'metadata.scheduleId': scheduleId
-    }).sort({ createdAt: -1 }).limit(100);
+    if (updatedSchedule) {
+      const comments = await CommentModel.find({
+        'metadata.scheduleId': scheduleId
+      }).sort({ createdAt: -1 }).limit(100);
 
-    const detailData = {
-      schedule: updatedSchedule,
-      comments
-    };
+      const detailData = {
+        schedule: updatedSchedule,
+        comments
+      };
 
-    // 🧹 Clear old cache and set updated one
-    await cacheService.deleteUserData(updatedSchedule.user.toString(), `schedule:${scheduleId}`);
-    await cacheService.setUserData(updatedSchedule.user.toString(), `schedule:${scheduleId}`, detailData, 300);
+      // 🧹 Clear old cache and set updated one
+      await cacheService.deleteUserData(updatedSchedule.user.toString(), `schedule:${scheduleId}`);
+      await cacheService.setUserData(updatedSchedule.user.toString(), `schedule:${scheduleId}`, detailData, 300);
+    } else {
+      console.warn(`⚠️ Schedule ${scheduleId} not found after progress update`);
+    }
 
     // 🎯 Update YouTube account stats
     let updateFields = {
