@@ -1,0 +1,21 @@
+# Use official Node.js LTS version
+FROM node:18-alpine
+
+# Create app directory
+WORKDIR /app
+
+# Install dependencies
+COPY package*.json ./
+RUN npm install
+
+# Copy app source
+COPY . .
+
+# Expose port
+EXPOSE 8005
+
+# Install nodemon globally
+RUN npm install -g nodemon
+
+# Start using nodemon
+CMD ["nodemon", "index.js"]

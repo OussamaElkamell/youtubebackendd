@@ -4,7 +4,8 @@ const { authenticateJWT } = require('../middleware/auth.middleware');
 const { ScheduleModel } = require('../models/schedule.model');
 const { CommentModel } = require('../models/comment.model');
 const { YouTubeAccountModel } = require('../models/youtube-account.model');
-const { setupScheduleJob } = require('../services/scheduler.service');
+const { setupScheduleJob, pauseSchedule, deleteSchedule, updateScheduleCache } = require('../services/scheduler.service');
+const { cacheService } = require('../services/cacheService');
 
 const router = express.Router();
 
@@ -16,6 +17,13 @@ const router = express.Router();
 router.get('/', authenticateJWT, async (req, res, next) => {
   try {
     const { status, page = 1, limit = 20 } = req.query;
+    const cacheKey = `schedules:${req.user.id}:${status || 'all'}:${page}:${limit}`;
+    
+    // Try to get from cache first
+    const cachedData = await cacheService.getUserData(req.user.id, cacheKey);
+    if (cachedData) {
+      return res.json(cachedData);
+    }
     
     const query = { user: req.user.id };
     
@@ -32,7 +40,7 @@ router.get('/', authenticateJWT, async (req, res, next) => {
       
     const total = await ScheduleModel.countDocuments(query);
     
-    res.json({
+    const responseData = {
       schedules,
       pagination: {
         total,
@@ -40,7 +48,12 @@ router.get('/', authenticateJWT, async (req, res, next) => {
         limit: parseInt(limit),
         pages: Math.ceil(total / limit)
       }
-    });
+    };
+    
+    // Cache for 5 minutes
+    await cacheService.setUserData(req.user.id, cacheKey, responseData, 300);
+    
+    res.json(responseData);
   } catch (error) {
     next(error);
   }
@@ -53,6 +66,14 @@ router.get('/', authenticateJWT, async (req, res, next) => {
  */
 router.get('/:id', authenticateJWT, async (req, res, next) => {
   try {
+    const cacheKey = `schedule:${req.params.id}`;
+    
+    // Try to get from cache first
+    const cachedData = await cacheService.getUserData(req.user.id, cacheKey);
+    if (cachedData) {
+      return res.json(cachedData);
+    }
+    
     const schedule = await ScheduleModel.findOne({
       _id: req.params.id,
       user: req.user.id
@@ -68,7 +89,12 @@ router.get('/:id', authenticateJWT, async (req, res, next) => {
       'metadata.scheduleId': schedule._id
     }).sort({ createdAt: -1 }).limit(100);
     
-    res.json({ schedule, comments });
+    const responseData = { schedule, comments };
+    
+    // Cache for 5 minutes
+    await cacheService.setUserData(req.user.id, cacheKey, responseData, 300);
+    
+    res.json(responseData);
   } catch (error) {
     next(error);
   }
@@ -147,6 +173,9 @@ router.post('/', authenticateJWT, async (req, res, next) => {
     
     
     await schedule.save();
+    
+    // Invalidate cache
+    await cacheService.deleteUserData(req.user.id, `schedules:`);
     
     // Set up schedule job
     try {
@@ -232,6 +261,13 @@ router.put('/:id', authenticateJWT, async (req, res, next) => {
     
     await schedule.save();
     
+    // Update Redis cache with fresh data
+    await updateScheduleCache(req.params.id);
+    
+    // Invalidate cache
+    await cacheService.deleteUserData(req.user.id, `schedules:`);
+    await cacheService.deleteUserData(req.user.id, `schedule:${req.params.id}`);
+    
     // Re-setup schedule job if active
     if (schedule.status === 'active') {
       try {
@@ -285,6 +321,13 @@ router.delete('/:id', authenticateJWT, async (req, res, next) => {
       return res.status(404).json({ message: 'Schedule not found' });
     }
 
+    // Delete from Redis and stop active jobs
+    await deleteSchedule(scheduleId);
+
+    // Invalidate cache
+    await cacheService.deleteUserData(req.user.id, `schedules:`);
+    await cacheService.deleteUserData(req.user.id, `schedule:${scheduleId}`);
+
     res.json({ message: 'Schedule and related comments deleted successfully' });
   } catch (error) {
     next(error);
@@ -310,6 +353,14 @@ router.post('/:id/pause', authenticateJWT, async (req, res, next) => {
     
     schedule.status = 'paused';
     await schedule.save();
+    
+    // Update Redis cache and pause active jobs
+    await updateScheduleCache(req.params.id);
+    await pauseSchedule(req.params.id);
+    
+    // Invalidate cache
+    await cacheService.deleteUserData(req.user.id, `schedules:`);
+    await cacheService.deleteUserData(req.user.id, `schedule:${req.params.id}`);
     
     res.json({
       message: 'Schedule paused successfully',
@@ -338,6 +389,13 @@ router.post('/:id/resume', authenticateJWT, async (req, res, next) => {
     
     schedule.status = 'active';
     await schedule.save();
+    
+    // Update Redis cache with fresh data
+    await updateScheduleCache(req.params.id);
+    
+    // Invalidate cache
+    await cacheService.deleteUserData(req.user.id, `schedules:`);
+    await cacheService.deleteUserData(req.user.id, `schedule:${req.params.id}`);
     
     // Re-setup schedule job
     try {

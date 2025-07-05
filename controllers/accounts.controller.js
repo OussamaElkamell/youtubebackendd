@@ -63,73 +63,76 @@ const getAccountById = async (req, res, next) => {
 const updateAccount = async (req, res, next) => {
   try {
     const { status, proxy } = req.body;
-    
+    console.log('Incoming status:', status);
+
     const account = await YouTubeAccountModel.findOne({
       _id: req.params.id,
       user: req.user.id
     });
-    
+
     if (!account) {
       return res.status(404).json({ message: 'Account not found' });
     }
-    
-    // Update status if provided
-    if (status) {
-      account.status = status;
+
+    // Update status if provided (even if it's a falsy value like "", false, or "0")
+    if (typeof status !== 'undefined') {
+      account.set('status', status);
+      account.markModified('status'); // ensure Mongoose picks it up
+      console.log('Updated status to:', account.status);
     }
-    
+
     // Update proxy if provided
     if (proxy) {
       let proxyObj = await ProxyModel.findOne({
         proxy: proxy,
         user: req.user.id
       });
-      
+
       // If proxy doesn't exist, create a new one
-// If proxy doesn't exist, create a new one
-if (!proxyObj) {
-  const proxyParts = proxy.split(':'); // Split the proxy string into parts
+      if (!proxyObj) {
+        const proxyParts = proxy.split(':');
 
-  // Ensure we have at least host and port
-  if (proxyParts.length < 2) {
-    return res.status(400).json({ 
-      message: 'Invalid proxy format. Expected host:port or host:port:username:password.' 
-    });
-  }
+        if (proxyParts.length < 2) {
+          return res.status(400).json({ 
+            message: 'Invalid proxy format. Expected host:port or host:port:username:password.' 
+          });
+        }
 
-  const [host, port] = proxyParts;
-  const username = proxyParts.length >= 3 ? proxyParts[2] : null;
-  const password = proxyParts.length >= 4 ? proxyParts[3] : null;
+        const [host, port] = proxyParts;
+        const username = proxyParts.length >= 3 ? proxyParts[2] : null;
+        const password = proxyParts.length >= 4 ? proxyParts[3] : null;
 
-  // Validate host and port
-  if (!host || !port || isNaN(parseInt(port, 10))) {
-    return res.status(400).json({ 
-      message: 'Invalid proxy format. Host and port (must be a number) are required.' 
-    });
-  }
+        if (!host || !port || isNaN(parseInt(port, 10))) {
+          return res.status(400).json({ 
+            message: 'Invalid proxy format. Host and port (must be a number) are required.' 
+          });
+        }
 
-  // Create a new Proxy object
-  proxyObj = new ProxyModel({
-    proxy: proxy,
-    host: host.trim(),
-    port: parseInt(port, 10),
-    username: username ? username.trim() : null,
-    password: password ? password.trim() : null,
-    user: req.user.id
-  });
-  
-  await proxyObj.save(); // Save the new proxy to the database
-}
+        proxyObj = new ProxyModel({
+          proxy: proxy,
+          host: host.trim(),
+          port: parseInt(port, 10),
+          username: username ? username.trim() : null,
+          password: password ? password.trim() : null,
+          user: req.user.id
+        });
 
-// Assign the proxy ID to the account
-account.proxy = proxyObj._id;
+        await proxyObj.save();
+        console.log('Created new proxy:', proxyObj);
+      }
+
+      account.proxy = proxyObj._id;
     }
-    
+
+    console.log('Saving account with status:', account.status);
     await account.save();
-    
+
+    const refetched = await YouTubeAccountModel.findById(account._id);
+    console.log('Refetched status from DB:', refetched.status);
+
     res.json({ 
       message: 'Account updated successfully',
-      account 
+      account: refetched
     });
   } catch (error) {
     next(error);

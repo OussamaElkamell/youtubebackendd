@@ -2,12 +2,12 @@
   "name": "youtube-auto-commenter-server",
   "version": "1.0.0",
   "description": "Backend server for YouTube auto commenter with multi-account support",
-  "main": "src/index.js",
-  "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
+  "main": "index.js",
+ "scripts": {
+  "start": "node index.js",
+  "dev": "nodemon index.js",
+  "test": "echo \"Error: no test specified\" && exit 1"
+},
   "dependencies": {
     "@google-cloud/monitoring": "^5.0.1",
     "axios": "^1.6.0",

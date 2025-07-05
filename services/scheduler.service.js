@@ -6,16 +6,14 @@ const { ScheduleModel } = require('../models/schedule.model');
 const { CommentModel } = require('../models/comment.model');
 const { YouTubeAccountModel } = require('../models/youtube-account.model');
 const ApiProfile = require('../models/ApiProfile');
-const { postComment } = require('./youtube.service');
+const youtubeService = require('./youtube.service');
 const { assignRandomProxy } = require('./proxy.service');
 
 // Configuration constants
 const REDIS_CONFIG = {
 host: process.env.REDIS_HOST || 'localhost',
       port: process.env.REDIS_PORT || 6379,
-      username: 'default',
-    password: process.env.REDIS_PASSWORD,
-    tls:{}
+
 
 };
 
@@ -385,7 +383,7 @@ scheduleWorker.on('failed', (job, err) => {
         return { success: false, message: 'Invalid or inactive account' };
       }
       
-      const result = await postComment(commentId);
+      const result = await youtubeService.postComment(commentId);
   
       const quotaExceeded = result.error?.includes("quota") || result.error?.includes("dailyLimitExceeded");
       const proxyError = result.message?.includes("Proxy failed or invalid") || result.error?.includes("Proxy") || result.message === "Proxy failed or invalid";
@@ -454,7 +452,10 @@ scheduleWorker.on('failed', (job, err) => {
 
   // Worker event handlers
   scheduleWorker.on('completed', (job, result) => {
-    console.log(`Schedule job ${job.id} completed`, result);
+    // Filter out repeat job completion logs to reduce noise
+    if (!job.id?.includes('repeat:')) {
+      console.log(`Schedule job ${job.id} completed`, result);
+    }
   });
 
   scheduleWorker.on('failed', (job, error) => {
@@ -477,6 +478,26 @@ async function optimizedProcessSchedule(scheduleId) {
   try {
     // Ensure Redis connection
     if (!redisClient.isOpen) await redisClient.connect();
+
+    // 🔥 Add schedule execution lock to prevent double processing within same schedule
+    const lockKey = `schedule_processing:${scheduleId}`;
+    const lockValue = `${Date.now()}`;
+    
+    try {
+      // Try to acquire lock (expires in 10 seconds)
+      const lockAcquired = await redisClient.set(lockKey, lockValue, { 
+        EX: 10, 
+        NX: true 
+      });
+      
+      if (!lockAcquired) {
+        console.log(`[Schedule ${scheduleId}] Already being processed, skipping`);
+        return;
+      }
+    } catch (lockError) {
+      console.error(`[Schedule ${scheduleId}] Error acquiring lock:`, lockError);
+      return;
+    }
 
     // Check Redis cache
     let cachedSchedule;
@@ -687,29 +708,35 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     return;
   }
 
-  // Initialize comments array
-  const comments = [];
+  try {
+    // Get lastUsedAccount from Redis for this specific schedule
+    const lastUsedKey = `schedule:${schedule._id}:lastUsedAccount`;
+    const lastUsedAccountId = await redisClient.get(lastUsedKey);
+    
+    console.log(`[Schedule ${schedule._id}] Last used account from Redis:`, lastUsedAccountId);
+    console.log(`[Schedule ${schedule._id}] Available accounts:`, accounts.map(a => a._id.toString()));
 
-  // Start with the current last used account in the DB
-  let lastUsed = schedule.lastUsedAccount?.toString() || null;
-console.log('lastuseed',lastUsed);
-console.log("accccounts",accounts);
+    // Find next account that wasn't the last used one for this schedule
+    let nextAccount = accounts.find(acc => acc._id.toString() !== lastUsedAccountId);
+    
+    // If all accounts were last used (single account case), use the first one
+    if (!nextAccount) {
+      nextAccount = accounts[0];
+      console.log(`[Schedule ${schedule._id}] Using first account as fallback`);
+    }
 
-  // Exclude lastUsedAccount initially
-  let filteredAccounts = accounts.filter(acc => acc._id.toString() !== lastUsed);
-console.log('filtered',filteredAccounts);
+    if (!nextAccount) {
+      console.log(`[Schedule ${schedule._id}] No available accounts`);
+      return;
+    }
 
-  if (filteredAccounts.length === 0) {
-    console.log(`[Schedule ${schedule._id}] No available accounts after excluding lastUsedAccount`);
-    filteredAccounts=accounts
-  }
+    console.log(`[Schedule ${schedule._id}] Selected account:`, nextAccount._id.toString());
 
-  for (const account of filteredAccounts) {
     const randomVideo = targetVideos[Math.floor(Math.random() * targetVideos.length)];
 
     const comment = {
       user: schedule.user,
-      youtubeAccount: account._id,
+      youtubeAccount: nextAccount._id,
       videoId: randomVideo.videoId,
       scheduleId: schedule._id,
       content: getRandomTemplate(schedule.commentTemplates),
@@ -717,39 +744,39 @@ console.log('filtered',filteredAccounts);
       metadata: { scheduleId: schedule._id },
     };
 
-    comments.push(comment);
+    const [createdComment] = await Promise.all([
+      CommentModel.create(comment),
+      YouTubeAccountModel.updateOne(
+        { _id: nextAccount._id },
+        { lastUsed: new Date() }
+      ),
+      ScheduleModel.updateOne(
+        { _id: schedule._id },
+        {
+          $inc: { 'progress.totalComments': 1 },
+          $set: { lastUsedAccount: nextAccount._id },
+        }
+      ),
+      // Save lastUsedAccount to Redis for this schedule
+      redisClient.set(lastUsedKey, nextAccount._id.toString(), { EX: 86400 }) // 24 hour expiry
+    ]);
 
-    // Update last used for next iteration
-    lastUsed = account._id.toString();
-  }
-
-  const [createdComments] = await Promise.all([
-    CommentModel.insertMany(comments),
-    YouTubeAccountModel.updateMany(
-      { _id: { $in: accounts.map(a => a._id) } },
-      { lastUsed: new Date() }
-    ),
-    ScheduleModel.updateOne(
-      { _id: schedule._id },
-      {
-        $inc: { 'progress.totalComments': comments.length },
-        $set: { lastUsedAccount: lastUsed }, //<-- ✅ Update the last used account in ScheduleModel
-      }
-    ),
-  ]);
-
-  const jobs = createdComments.map(comment => ({
-    name: 'post-comment',
-    data: { commentId: comment._id, scheduleId: schedule._id },
-    opts: {
+    await commentQueue.add('post-comment', {
+      commentId: createdComment._id,
+      scheduleId: schedule._id
+    }, {
       delay: calculateOptimizedDelay(schedule.delays),
       attempts: 1,
       backoff: { type: 'exponential', delay: 3000 },
-    },
-  }));
+    });
 
-  console.log(`Queuing ${jobs.length} comments with random video selection`);
-  await commentQueue.addBulk(jobs);
+    console.log(`[Schedule ${schedule._id}] Queued 1 comment for account ${nextAccount._id}`);
+    
+  } catch (error) {
+    console.error(`[Schedule ${schedule._id}] Error managing account usage:`, error);
+    console.log(`[Schedule ${schedule._id}] Skipping comment creation due to Redis error`);
+    return;
+  }
 }
 
 
@@ -1029,11 +1056,50 @@ function setupMaintenanceJob() {
       const commentIds = comments.map(c => c._id.toString());
       
 
-      const jobs = await commentQueue.getJobs(['failed','waiting', 'delayed']);
-      for (const job of jobs) {
-        if (job.failedReason?.includes('Missing key for job')) {
-          await job.remove();
+      // Clean orphaned jobs (but skip repeat jobs - they need scheduler removal)
+      const [commentJobs, scheduleJobs] = await Promise.all([
+        commentQueue.getJobs(['failed', 'waiting', 'delayed', 'completed']),
+        scheduleQueue.getJobs(['failed', 'waiting', 'delayed', 'completed'])
+      ]);
+      
+      for (const job of [...commentJobs, ...scheduleJobs]) {
+        // Only remove non-repeat jobs with specific errors
+        if (job.failedReason?.includes('Missing key for job') && 
+            !job.name?.includes('repeat:') && 
+            !job.id?.includes('repeat:')) {
+          try {
+            await job.remove();
+            console.log(`Removed orphaned job: ${job.id}`);
+          } catch (removeError) {
+            console.error(`Error removing job ${job.id}:`, removeError);
+          }
         }
+      }
+      
+      // Clean up orphaned repeat job schedulers
+      try {
+        const [commentSchedulers, scheduleSchedulers] = await Promise.all([
+          commentQueue.getJobSchedulers(),
+          scheduleQueue.getJobSchedulers()
+        ]);
+        
+        for (const scheduler of [...commentSchedulers, ...scheduleSchedulers]) {
+          try {
+            // Check if the schedule still exists and is active
+            const scheduleId = scheduler.id?.replace('interval-', '');
+            if (scheduleId && scheduleId !== scheduler.id) {
+              const schedule = await ScheduleModel.findById(scheduleId).select('status').lean();
+              if (!schedule || schedule.status !== 'active') {
+                await scheduleQueue.removeJobScheduler(scheduler.key);
+                console.log(`Removed orphaned scheduler: ${scheduler.key}`);
+              }
+            }
+          } catch (schedulerError) {
+            console.error(`Error checking scheduler ${scheduler.key}:`, schedulerError);
+          }
+        }
+      } catch (schedulerCleanupError) {
+        console.error('Error cleaning schedulers:', schedulerCleanupError);
       }
       
       // Clean completed/failed jobs
@@ -1142,6 +1208,104 @@ async function shutdown() {
   }
 }
 
+/**
+ * Pause a schedule in Redis
+ */
+async function pauseSchedule(scheduleId) {
+  try {
+    if (!redisClient?.isOpen) await initRedis();
+    
+    // Update Redis cache to paused status
+    await redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
+      id: scheduleId,
+      status: 'paused',
+      type: 'unknown',
+      user: 'unknown'
+    }), { EX: 86400 });
+    
+    // Stop active job if exists
+    if (activeJobs.has(scheduleId)) {
+      await activeJobs.get(scheduleId).stop();
+      activeJobs.delete(scheduleId);
+    }
+    
+    console.log(`Schedule ${scheduleId} paused in Redis`);
+    return true;
+  } catch (error) {
+    console.error(`Error pausing schedule ${scheduleId}:`, error);
+    return false;
+  }
+}
+
+/**
+ * Update schedule in Redis after database changes
+ */
+async function updateScheduleCache(scheduleId) {
+  try {
+    if (!redisClient?.isOpen) await initRedis();
+    
+    // Get fresh schedule data from database
+    const schedule = await ScheduleModel.findById(scheduleId).lean();
+    if (!schedule) {
+      // Schedule deleted, remove from cache
+      await deleteSchedule(scheduleId);
+      return true;
+    }
+    
+    // Update Redis cache with fresh data
+    await redisClient.set(`schedule:${scheduleId}`, JSON.stringify({
+      id: schedule._id.toString(),
+      status: schedule.status,
+      type: schedule.schedule.type,
+      user: schedule.user.toString()
+    }), { 
+      EX: schedule.status === 'error' ? 3600 : 86400
+    });
+    
+    // If schedule was updated and is now active, restart the job
+    if (schedule.status === 'active') {
+      await setupScheduleJob(scheduleId);
+    } else if (activeJobs.has(scheduleId)) {
+      // If not active, stop any running jobs
+      await activeJobs.get(scheduleId).stop();
+      activeJobs.delete(scheduleId);
+    }
+    
+    console.log(`Schedule ${scheduleId} cache updated in Redis`);
+    return true;
+  } catch (error) {
+    console.error(`Error updating schedule cache ${scheduleId}:`, error);
+    return false;
+  }
+}
+
+/**
+ * Delete a schedule from Redis
+ */
+async function deleteSchedule(scheduleId) {
+  try {
+    if (!redisClient?.isOpen) await initRedis();
+    
+    // Remove from Redis
+    await Promise.all([
+      redisClient.del(`schedule:${scheduleId}`),
+      redisClient.del(`schedule:${scheduleId}:lastUsedAccount`)
+    ]);
+    
+    // Stop active job if exists
+    if (activeJobs.has(scheduleId)) {
+      await activeJobs.get(scheduleId).stop();
+      activeJobs.delete(scheduleId);
+    }
+    
+    console.log(`Schedule ${scheduleId} deleted from Redis`);
+    return true;
+  } catch (error) {
+    console.error(`Error deleting schedule ${scheduleId}:`, error);
+    return false;
+  }
+}
+
 module.exports = {
   setupScheduler,
   setupScheduleJob,
@@ -1150,6 +1314,9 @@ module.exports = {
   scheduleQuotaReset,
   scheduleFrequentStatusReset,
   setupMaintenanceSheduler,
+  pauseSchedule,
+  deleteSchedule,
+  updateScheduleCache,
   resetRedis,
   shutdown
 };

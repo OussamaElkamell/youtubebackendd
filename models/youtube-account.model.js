@@ -96,7 +96,7 @@ const YouTubeAccountSchema = new mongoose.Schema({
     type: Number,
     default: 3
   },
-  postingSchedules: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Schedule' }],
+ 
 
 }, {
   timestamps: true, // Adds createdAt and updatedAt automatically
@@ -160,14 +160,19 @@ YouTubeAccountSchema.pre('save', function(next) {
       likeCount: 0
     };
   }
-  
-  // If proxyErrorCount exceeds threshold, set status to inactive
-  if (this.proxyErrorCount >= this.proxyErrorThreshold) {
+
+  // 👇 Only override if the status is not being updated manually
+  if (
+    this.proxyErrorCount >= this.proxyErrorThreshold &&
+    this.isModified('proxyErrorCount') &&
+    !this.isModified('status') // allow manual override
+  ) {
     this.status = 'inactive';
   }
 
   next();
 });
+
 
 const YouTubeAccountModel = mongoose.model('YouTubeAccount', YouTubeAccountSchema);
 
