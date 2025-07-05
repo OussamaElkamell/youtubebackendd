@@ -8,17 +8,12 @@ const { YouTubeAccountModel } = require('../models/youtube-account.model');
 const ApiProfile = require('../models/ApiProfile');
 const youtubeService = require('./youtube.service');
 const { assignRandomProxy } = require('./proxy.service');
-
+require('dotenv').config();
 // Configuration constants
 const REDIS_CONFIG = {
 // host: process.env.REDIS_HOST || 'localhost',
 //       port: process.env.REDIS_PORT || 6379,
-
-url: process.env.REDIS_URL,
-  socket: {
-  
-    reconnectStrategy: retries => Math.min(retries * 100, 5000)
-  }
+url: process.env.REDIS_URL
 };
 
 const QUEUE_CONFIG = {
