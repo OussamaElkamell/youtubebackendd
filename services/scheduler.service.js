@@ -333,75 +333,69 @@ async function fetchNextComment(scheduleId) {
  * Setup workers for processing queues
  */
 function setupWorkers() {
-  // Schedule worker
-const scheduleWorker = new Worker('schedule-processing', async (job) => {
-  console.log(`Processing schedule job ${job.id} with data:`, job.data);
-  const { scheduleId } = job.data;
-  try {
-    await optimizedProcessSchedule(scheduleId);
-  } catch (error) {
-    console.error(`Error processing schedule ${scheduleId}:`, error);
-    throw error;
-  }
-}, {
-  connection: REDIS_CONFIG,
-  concurrency: 5,
-  settings: {
+  // ✅ Schedule worker
+  const scheduleWorker = new Worker('schedule-processing', async (job) => {
+    console.log(`Processing schedule job ${job.id} with data:`, job.data);
+    const { scheduleId } = job.data;
+    try {
+      await optimizedProcessSchedule(scheduleId);
+    } catch (error) {
+      console.error(`Error processing schedule ${scheduleId}:`, error);
+      throw error;
+    }
+  }, {
+    connection: REDIS_CONFIG,
+    concurrency: 5,
+    settings: {
       maxStalledCount: 0,
       lockRenewTime: 30000,
       stalledInterval: 0
     }
-});
+  });
 
-scheduleWorker.on('completed', (job) => {
-  console.log(`Schedule job ${job.id} completed`);
-});
-
-scheduleWorker.on('failed', (job, err) => {
-  console.error(`Schedule job ${job.id} failed:`, err);
-});
-  // Comment worker
+  // ✅ Comment worker
   const commentWorker = new Worker('comment-posting', async (job) => {
-  const { commentId, scheduleId } = job.data;
-  console.log("🔄 Processing comment job:", commentId);
+    const { commentId, scheduleId } = job.data;
+    console.log("🔄 Processing comment job:", commentId);
 
-  try {
-    const comment = await getCommentWithRetry(commentId);
-    if (!comment) throw new Error(`Comment ${commentId} not found`);
+    try {
+      const comment = await getCommentWithRetry(commentId);
+      if (!comment) throw new Error(`Comment ${commentId} not found`);
 
-    if (!comment.youtubeAccount || comment.youtubeAccount.status !== 'active') {
-      await CommentModel.updateOne(
-        { _id: commentId },
-        { status: 'failed', errorMessage: 'Invalid or inactive account' }
-      );
+      if (!comment.youtubeAccount || comment.youtubeAccount.status !== 'active') {
+        await CommentModel.updateOne(
+          { _id: commentId },
+          { status: 'failed', errorMessage: 'Invalid or inactive account' }
+        );
 
-      await ScheduleModel.updateOne(
-        { _id: scheduleId },
-        { $inc: { 'progress.failedComments': 1 } }
-      );
+        await ScheduleModel.updateOne(
+          { _id: scheduleId },
+          { $inc: { 'progress.failedComments': 1 } }
+        );
 
-      return { success: false, message: 'Invalid or inactive account' };
-    }
+        return { success: false, message: 'Invalid or inactive account' };
+      }
 
-    const result = await youtubeService.postComment(commentId);
+      const result = await youtubeService.postComment(commentId);
 
-    const quotaExceeded = result.error?.includes("quota") || result.error?.includes("dailyLimitExceeded");
-    const proxyError = result.message?.includes("Proxy failed or invalid") || result.error?.includes("Proxy") || result.message === "Proxy failed or invalid";
-    const duplication = result.message?.includes("No available accounts. Comment delayed for retry.") || result.error?.includes("Comment delayed for retry");
+      const quotaExceeded = result.error?.includes("quota") || result.error?.includes("dailyLimitExceeded");
+      const proxyError = result.message?.includes("Proxy failed or invalid") || result.error?.includes("Proxy");
+      const duplication = result.message?.includes("No available accounts. Comment delayed for retry.") || result.error?.includes("Comment delayed for retry");
 
-    const updateProgress = result.success
-      ? { $inc: { 'progress.postedComments': 1 } }
-      : { $inc: { 'progress.failedComments': 1 } };
+      const updateProgress = result.success
+        ? { $inc: { 'progress.postedComments': 1 } }
+        : { $inc: { 'progress.failedComments': 1 } };
 
-    // ✅ MongoDB progress update
-    await ScheduleModel.updateOne({ _id: scheduleId }, updateProgress);
+      // ✅ MongoDB progress update
+      await ScheduleModel.updateOne({ _id: scheduleId }, updateProgress);
 
-    // 🔄 REFRESH Redis cache with updated schedule progress
-    const updatedSchedule = await ScheduleModel.findById(scheduleId)
-      .populate('selectedAccounts', 'email channelTitle status')
-      .lean();
+      // ✅ REFRESH Redis cache (detailed + list)
+      const updatedSchedule = await ScheduleModel.findById(scheduleId)
+        .populate('selectedAccounts', 'email channelTitle status')
+        .lean();
 
-    if (updatedSchedule) {
+      const userId = updatedSchedule.user.toString();
+
       const comments = await CommentModel.find({
         'metadata.scheduleId': scheduleId
       }).sort({ createdAt: -1 }).limit(100);
@@ -411,94 +405,111 @@ scheduleWorker.on('failed', (job, err) => {
         comments
       };
 
-      // 🧹 Clear old cache and set updated one
-      await cacheService.deleteUserData(updatedSchedule.user.toString(), `schedule:${scheduleId}`);
-      await cacheService.setUserData(updatedSchedule.user.toString(), `schedule:${scheduleId}`, detailData, 300);
-    } else {
-      console.warn(`⚠️ Schedule ${scheduleId} not found after progress update`);
-    }
+      await cacheService.deleteUserData(userId, `schedule:${scheduleId}`);
+      await cacheService.setUserData(userId, `schedule:${scheduleId}`, detailData, 300);
 
-    // 🎯 Update YouTube account stats
-    let updateFields = {
-      lastMessage: result.success ? 'Comment posted successfully' : result.message || result.error || 'Unknown error',
-    };
+      // 🔁 Refresh page 1 of schedule list
+      const page = 1;
+      const limit = 20;
+      const schedules = await ScheduleModel.find({ user: userId })
+        .populate('selectedAccounts', 'email channelTitle status')
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean();
 
-    if (result.success) {
-      updateFields.status = 'active';
-      updateFields.proxyErrorCount = 0;
+      const total = await ScheduleModel.countDocuments({ user: userId });
+      const paginatedData = {
+        schedules,
+        pagination: {
+          total,
+          page,
+          limit,
+          pages: Math.ceil(total / limit)
+        }
+      };
 
-      const schedule = await ScheduleModel.findById(scheduleId);
-      if (schedule?.schedule?.type === 'interval') {
-        await handleIntervalSchedule(schedule, scheduleId);
+      const listKey = `schedules:${userId}:all:${page}:${limit}`;
+      await cacheService.setUserData(userId, listKey, paginatedData, 300);
+
+      // 🎯 YouTube account status handling
+      let updateFields = {
+        lastMessage: result.success ? 'Comment posted successfully' : result.message || result.error || 'Unknown error',
+      };
+
+      if (result.success) {
+        updateFields.status = 'active';
+        updateFields.proxyErrorCount = 0;
+
+        const schedule = await ScheduleModel.findById(scheduleId);
+        if (schedule?.schedule?.type === 'interval') {
+          await handleIntervalSchedule(schedule, scheduleId);
+        }
+
+      } else if (proxyError) {
+        const currentAccount = await YouTubeAccountModel.findById(comment.youtubeAccount._id);
+        const newCount = (currentAccount?.proxyErrorCount || 0) + 1;
+        updateFields.proxyErrorCount = newCount;
+        updateFields.status = newCount >= 10 ? 'inactive' : 'active';
+
+      } else if (duplication) {
+        const currentAccount = await YouTubeAccountModel.findById(comment.youtubeAccount._id);
+        const newCount = (currentAccount?.duplicationCount || 0) + 1;
+        updateFields.duplicationCount = newCount;
+        updateFields.status = 'active';
+
+      } else {
+        updateFields.proxyErrorCount = 0;
+        updateFields.status = 'inactive';
       }
 
-    } else if (proxyError) {
-      const currentAccount = await YouTubeAccountModel.findById(comment.youtubeAccount._id);
-      const newCount = (currentAccount?.proxyErrorCount || 0) + 1;
-      updateFields.proxyErrorCount = newCount;
-      updateFields.status = newCount >= 10 ? 'inactive' : 'active';
+      if (comment.youtubeAccount._id) {
+        await YouTubeAccountModel.updateOne(
+          { _id: comment.youtubeAccount._id },
+          { $set: updateFields }
+        );
+      }
 
-    } else if (duplication) {
-      const currentAccount = await YouTubeAccountModel.findById(comment.youtubeAccount._id);
-      const newCount = (currentAccount?.duplicationCount || 0) + 1;
-      updateFields.duplicationCount = newCount;
-      updateFields.status = 'active';
+      if (quotaExceeded) {
+        await handleQuotaExceeded(comment.youtubeAccount.google.profileId);
+      }
 
-    } else {
-      updateFields.proxyErrorCount = 0;
-      updateFields.status = 'inactive';
+      if (result.success) {
+        await updateProfileQuota(comment.youtubeAccount._id);
+      }
+
+      await updateCommentStatus(commentId, result);
+
+      return result;
+
+    } catch (error) {
+      console.error(`❌ Error processing comment ${commentId}:`, error);
+      await handleCommentError(commentId, error);
+      throw error;
     }
+  }, {
+    connection: REDIS_CONFIG,
+    concurrency: 30,
+    limiter: { max: 100, duration: 1000 }
+  });
 
-    // ✅ Save account state
-    if (comment.youtubeAccount._id) {
-      await YouTubeAccountModel.updateOne(
-        { _id: comment.youtubeAccount._id },
-        { $set: updateFields }
-      );
-    }
-
-    if (quotaExceeded) {
-      await handleQuotaExceeded(comment.youtubeAccount.google.profileId);
-    }
-
-    if (result.success) {
-      await updateProfileQuota(comment.youtubeAccount._id);
-    }
-
-    await updateCommentStatus(commentId, result);
-
-    return result;
-
-  } catch (error) {
-    console.error(`❌ Error processing comment ${commentId}:`, error);
-    await handleCommentError(commentId, error);
-    throw error;
-  }
-}, {
-  connection: REDIS_CONFIG,
-  concurrency: 30,
-  limiter: { max: 100, duration: 1000 }
-});
-
-
-  // Worker event handlers
+  // 🎯 Worker Event Handlers
   scheduleWorker.on('completed', (job, result) => {
-    // Filter out repeat job completion logs to reduce noise
     if (!job.id?.includes('repeat:')) {
-      console.log(`Schedule job ${job.id} completed`, result);
+      console.log(`✅ Schedule job ${job.id} completed`, result);
     }
   });
 
   scheduleWorker.on('failed', (job, error) => {
-    console.error(`Schedule job ${job.id} failed:`, error);
+    console.error(`❌ Schedule job ${job.id} failed:`, error);
   });
 
   commentWorker.on('completed', (job, result) => {
-    console.log(`Comment job ${job.id} completed`, result);
+    console.log(`✅ Comment job ${job.id} completed`, result);
   });
 
   commentWorker.on('failed', (job, error) => {
-    console.error(`Comment job ${job.id} failed:`, error);
+    console.error(`❌ Comment job ${job.id} failed:`, error);
   });
 }
 
