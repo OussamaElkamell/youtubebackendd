@@ -11,10 +11,14 @@ const { assignRandomProxy } = require('./proxy.service');
 
 // Configuration constants
 const REDIS_CONFIG = {
-host: process.env.REDIS_HOST || 'localhost',
-      port: process.env.REDIS_PORT || 6379,
+// host: process.env.REDIS_HOST || 'localhost',
+//       port: process.env.REDIS_PORT || 6379,
 
-
+url: process.env.REDIS_URL,
+  socket: {
+    tls: process.env.REDIS_URL.startsWith('rediss://'), // Enable TLS for Upstash
+    reconnectStrategy: retries => Math.min(retries * 100, 5000)
+  }
 };
 
 const QUEUE_CONFIG = {
