@@ -4,6 +4,13 @@ class CacheService {
   constructor(prefix = 'app') {
     this.keyPrefix = prefix;
     this.client = null;
+    
+    // Log Redis configuration (external Redis only, no Docker)
+    console.log('📡 Redis configuration for external cache:', {
+      url: process.env.REDIS_URL?.replace(/\/\/.*@/, '//***:***@'), // Hide credentials
+      mode: process.env.NODE_ENV === 'production' ? 'production' : 'development',
+      tls: process.env.NODE_ENV === 'production'
+    });
   }
 
   async initClient() {
@@ -16,7 +23,8 @@ class CacheService {
         }
       });
       
-      this.client.on('error', (err) => console.error('Cache Redis Client Error:', err));
+      this.client.on('error', (err) => console.error('❌ Cache Redis Client Error:', err));
+      this.client.on('connect', () => console.log('✅ Connected to external Redis cache successfully'));
       await this.client.connect();
     }
     return this.client;
