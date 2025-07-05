@@ -16,7 +16,7 @@ const REDIS_CONFIG = {
 
 url: process.env.REDIS_URL,
   socket: {
-    tls: process.env.REDIS_URL.startsWith('rediss://'), // Enable TLS for Upstash
+  
     reconnectStrategy: retries => Math.min(retries * 100, 5000)
   }
 };
