@@ -391,10 +391,19 @@ function setupWorkers() {
 
       // ✅ REFRESH Redis cache (detailed + list)
       const updatedSchedule = await ScheduleModel.findById(scheduleId)
-        .populate('selectedAccounts', 'email channelTitle status')
-        .lean();
+  .populate('selectedAccounts', 'email channelTitle status')
+  .lean();
 
-      const userId = updatedSchedule.user.toString();
+if (!updatedSchedule) {
+  console.warn(`⚠️ Schedule not found in DB when trying to update Redis. ID: ${scheduleId}`);
+  return;
+}
+
+if (!updatedSchedule.user) {
+  console.warn(`⚠️ Schedule ${scheduleId} has no user field. Skipping Redis cache update.`);
+  return;
+}
+
 
       const comments = await CommentModel.find({
         'metadata.scheduleId': scheduleId
