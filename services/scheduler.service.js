@@ -403,7 +403,7 @@ if (!updatedSchedule.user) {
   console.warn(`⚠️ Schedule ${scheduleId} has no user field. Skipping Redis cache update.`);
   return;
 }
-
+const userId = updatedSchedule.user.toString();
 
       const comments = await CommentModel.find({
         'metadata.scheduleId': scheduleId
