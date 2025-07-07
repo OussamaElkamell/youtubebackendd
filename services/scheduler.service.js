@@ -22,7 +22,7 @@ const REDIS_CONFIG = {
 };
 
 const QUEUE_CONFIG = {
-  connection: REDIS_IOREDIS_CONFIG,
+  connection: REDIS_CONFIG,
   defaultJobOptions: {
     attempts: 1,
     backoff: { type: 'exponential', delay: 3000 },
