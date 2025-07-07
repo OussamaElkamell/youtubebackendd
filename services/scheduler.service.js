@@ -779,7 +779,9 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     const indexKey = `schedule:${schedule._id}:accountIndex`;
     let index = parseInt(await redisClient.get(indexKey)) || 0;
 
-    const lastUsedKey = `schedule:${schedule._id}:lastUsedAccount`;
+    // 🔀 Pick a random video
+    const randomVideo = targetVideos[Math.floor(Math.random() * targetVideos.length)];
+    const lastUsedKey = `schedule:${schedule._id}:video:${randomVideo.videoId}:lastUsedAccount`;
     const lastUsedAccount = await redisClient.get(lastUsedKey);
 
     let attempts = 0;
@@ -793,7 +795,7 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
       if (!candidate) continue;
 
       if (candidate._id.toString() === lastUsedAccount) {
-        console.log(`[Schedule ${schedule._id}] Account ${candidate._id} was used last. Avoiding consecutive use.`);
+        console.log(`[Schedule ${schedule._id}] Account ${candidate._id} was used last for video ${randomVideo.videoId}. Avoiding consecutive use.`);
         continue;
       }
 
@@ -816,9 +818,9 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
       return;
     }
 
-    const randomVideo = targetVideos[Math.floor(Math.random() * targetVideos.length)];
-
+    // Cooldown + Redis record
     await redisClient.set(`account:${nextAccount._id}:cooldown`, '1', { EX: 30 });
+    await redisClient.set(lastUsedKey, nextAccount._id.toString(), { EX: 3600 });
 
     const comment = {
       user: schedule.user,
@@ -839,8 +841,7 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
           $inc: { 'progress.totalComments': 1 },
           $set: { lastUsedAccount: nextAccount._id },
         }
-      ),
-      redisClient.set(lastUsedKey, nextAccount._id.toString(), { EX: 3600 }), // 🆕 Save for next loop
+      )
     ]);
 
     const jobId = `post-comment-${createdComment._id.toString()}`;
@@ -855,7 +856,7 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
       backoff: { type: 'exponential', delay: 3000 },
     });
 
-    console.log(`[Schedule ${schedule._id}] Queued 1 comment for account ${nextAccount._id}`);
+    console.log(`[Schedule ${schedule._id}] Queued comment for account ${nextAccount._id} on video ${randomVideo.videoId}`);
 
   } catch (error) {
     console.error(`[Schedule ${schedule._id}] Error managing account usage:`, error);
