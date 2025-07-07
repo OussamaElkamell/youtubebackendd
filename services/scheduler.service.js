@@ -11,7 +11,7 @@ const { assignRandomProxy } = require('./proxy.service');
 const { cacheService } = require('../services/cacheService');
 require('dotenv').config();
 const redisURL = new URL(process.env.REDIS_URL);
-// Configuration constants
+
 const REDIS_CONFIG = {
   host: redisURL.hostname,
   port: Number(redisURL.port),
