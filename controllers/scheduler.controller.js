@@ -45,7 +45,7 @@ const getSchedules = async (req, res, next) => {
     };
     
     // Cache for 5 minutes
-    await cacheService.setUserData(req.user.id, cacheKey, responseData, 300);
+    await cacheService.setUserData(req.user.id, cacheKey, responseData, 5);
     
     res.json(responseData);
   } catch (error) {
@@ -84,7 +84,7 @@ const getScheduleById = async (req, res, next) => {
     const responseData = { schedule, comments };
     
     // Cache for 5 minutes
-    await cacheService.setUserData(req.user.id, cacheKey, responseData, 300);
+    await cacheService.setUserData(req.user.id, cacheKey, responseData, 5);
     
     res.json(responseData);
   } catch (error) {
@@ -209,6 +209,7 @@ const updateSchedule = async (req, res, next) => {
       accountSelection,
       selectedAccounts,
       schedule: scheduleConfig,
+      includeEmojis,
       delays
     } = req.body;
 
@@ -231,6 +232,7 @@ const updateSchedule = async (req, res, next) => {
     if (accountSelection) schedule.accountSelection = accountSelection;
     if (delays) schedule.delays = delays; // ✅ FULL REPLACEMENT
     if (scheduleConfig) schedule.schedule = scheduleConfig; // ✅ FULL REPLACEMENT
+    if (includeEmojis) schedule.includeEmojis = includeEmojis; 
 
     // 3. Validate and update selected accounts
     if (selectedAccounts && selectedAccounts.length > 0) {

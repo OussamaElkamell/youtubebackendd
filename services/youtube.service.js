@@ -136,107 +136,89 @@ async function postComment(commentId) {
 
     const account = comment.youtubeAccount;
     if (!account || account.status === null) {
-      console.warn('Account status is null, deleting comment...');
+      console.warn("Account status is null, deleting comment...");
       await comment.deleteOne();
       return {
         success: false,
-        message: 'Comment deleted due to invalid account or status',
+        message: "Comment deleted due to invalid account or status",
+        error: null,
       };
     }
 
-    // Check if account is active
     if (account.status !== "active") {
-      console.warn(`Account is not active: ${account.status}`);
       throw new Error(`YouTube account is ${account.status}`);
     }
 
-    // Fetch the schedule
     const schedule = await ScheduleModel.findById(comment.scheduleId).exec();
     const includeEmojis = schedule?.includeEmojis === true;
 
-    // Proxy handling
     const proxy = account.proxy;
-    let agent;
-    if (proxy) {
-      try {
-        agent = await createProxyAgent(proxy);
-        const oauth2Client = await refreshTokenIfNeeded(account);
-        const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-        youtube.request = axios.create({
-          httpsAgent: agent,
-          httpAgent: agent,
-        });
-
-        // Prepare comment content
-        if (!comment.content || comment.content.trim() === '') {
-          throw new Error("Comment content is empty");
-        }
-
-        let sanitizedContent = comment.content.trim();
-        if (includeEmojis) {
-          sanitizedContent = addRandomEmojis(sanitizedContent);
-        }
-        sanitizedContent = randomizeSiParamInYoutubeUrl(sanitizedContent);
-
-        if (!sanitizedContent) {
-          throw new Error("Comment content is empty after processing");
-        }
-
-        const commentData = {
-          snippet: {
-            videoId: comment.videoId,
-            topLevelComment: {
-              snippet: {
-                textOriginal: sanitizedContent,
-              },
-            },
-          },
-        };
-
-        if (comment.parentId) {
-          commentData.snippet.parentId = comment.parentId;
-          console.log("Posting reply to parentId:", comment.parentId);
-        } else {
-          console.log("Posting top-level comment to videoId:", comment.videoId);
-        }
-
-        const response = await youtube.commentThreads.insert({
-          part: "snippet",
-          requestBody: commentData,
-        });
-
-        const youtubeCommentId = response.data.id;
-
-        // Update daily usage for the account
-        await updateDailyUsage(account._id, "commentCount");
-
-        // 🔥 Update last used account in schedule
-        await ScheduleModel.findByIdAndUpdate(comment.scheduleId, {
-          lastUsedAccount: account._id,
-        });
-
-        return {
-          success: true,
-          commentId: youtubeCommentId,
-          message: "Comment posted successfully",
-        };
-
-      } catch (proxyError) {
-        console.warn("Proxy failed, trying direct connection...");
-
-        return {
-          success: false,
-          message: "Proxy failed or invalid",
-          error: proxyError.message,
-        };
-      }
-    } else {
-      console.warn("No proxy found for account");
-      return {
-        success: false,
-        message: "No proxy for this account",
-      };
+    if (!proxy) {
+      throw new Error("No proxy assigned to account");
     }
+
+    // Use proxy agent
+    const agent = await createProxyAgent(proxy);
+    const oauth2Client = await refreshTokenIfNeeded(account);
+    const youtube = google.youtube({ version: "v3", auth: oauth2Client });
+
+    youtube.request = axios.create({
+      httpsAgent: agent,
+      httpAgent: agent,
+    });
+
+    // Validate comment content
+    if (!comment.content || comment.content.trim() === "") {
+      throw new Error("Comment content is empty");
+    }
+
+    let sanitizedContent = comment.content.trim();
+    if (includeEmojis) {
+      sanitizedContent = addRandomEmojis(sanitizedContent);
+    }
+    sanitizedContent = randomizeSiParamInYoutubeUrl(sanitizedContent);
+
+    if (!sanitizedContent) {
+      throw new Error("Comment content is empty after processing");
+    }
+
+    const commentData = {
+      snippet: {
+        videoId: comment.videoId,
+        topLevelComment: {
+          snippet: {
+            textOriginal: sanitizedContent,
+          },
+        },
+      },
+    };
+
+    if (comment.parentId) {
+      commentData.snippet.parentId = comment.parentId;
+      console.log("Posting reply to parentId:", comment.parentId);
+    } else {
+      console.log("Posting top-level comment to videoId:", comment.videoId);
+    }
+
+    const response = await youtube.commentThreads.insert({
+      part: "snippet",
+      requestBody: commentData,
+    });
+
+    const youtubeCommentId = response.data.id;
+
+    // Update usage and schedule
+    await updateDailyUsage(account._id, "commentCount");
+    await ScheduleModel.findByIdAndUpdate(comment.scheduleId, {
+      lastUsedAccount: account._id,
+    });
+
+    return {
+      success: true,
+      commentId: youtubeCommentId,
+      message: "Comment posted successfully",
+      error: null,
+    };
   } catch (error) {
     console.error("Error posting comment:", error.message);
 
@@ -246,10 +228,12 @@ async function postComment(commentId) {
       error.message.includes("dailyLimitExceeded")
     ) {
       try {
-        const account = comment.youtubeAccount;
-        account.status = "limited";
-        await account.save();
-        console.log("Account status updated to 'limited'.");
+        const comment = await CommentModel.findById(commentId).populate("youtubeAccount");
+        if (comment?.youtubeAccount) {
+          comment.youtubeAccount.status = "limited";
+          await comment.youtubeAccount.save();
+          console.log("Account status updated to 'limited'.");
+        }
       } catch (updateError) {
         console.error("Error updating account status:", updateError);
       }
@@ -257,7 +241,8 @@ async function postComment(commentId) {
 
     return {
       success: false,
-      error: error.message || "Failed to post comment",
+      message: error.message,
+      error: error.message || "Unknown error",
     };
   }
 }

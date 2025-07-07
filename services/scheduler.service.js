@@ -146,50 +146,66 @@ async function setupScheduleJob(scheduleId) {
 
     // Process schedule type
     switch (schedule.schedule.type) {
-      case 'immediate':
-        await scheduleQueue.add('process-schedule', { scheduleId }, { priority: 1 });
-        break;
-        
-      case 'once':
-        const delayMs = Math.max(0, new Date(schedule.schedule.startDate) - Date.now());
-        await scheduleQueue.add('process-schedule', { scheduleId }, { delay: delayMs });
-        break;
-        
-      case 'recurring':
-        if (schedule.schedule.cronExpression) {
-          const job = cron.schedule(schedule.schedule.cronExpression, async () => {
-            await scheduleQueue.add('process-schedule', { scheduleId });
-          }, { timezone: 'America/Los_Angeles' });
-          activeJobs.set(scheduleId, job);
-        }
-        break;
-        
-      case 'interval':
-        
-        if (schedule.schedule.interval?.value > 0) {
-          const intervalMs = schedule.delays?.delayofsleep > 0 
-            ? schedule.delays.delayofsleep * 60 * 1000
-            : calculateIntervalMs(schedule.schedule.interval);
-          
-          const jobId = `interval-${scheduleId}`;
-          
-          await scheduleQueue.add('process-schedule', { scheduleId }, {
-            repeat: { every: intervalMs },
-            jobId,
-            removeOnComplete: true,
-            removeOnFail: true
-          });
-            console.log('Check');
-          activeJobs.set(scheduleId, {
-            stop: async () => {
-              const jobs = await scheduleQueue.getJobSchedulers();
-              const job = jobs.find(j => j.id === jobId);
-              if (job) await scheduleQueue.removeJobScheduler(job.key);
-            }
-          });
-        }
-        break;
+  case 'immediate':
+    await scheduleQueue.add('process-schedule', { scheduleId }, {
+      priority: 1,
+      jobId: `immediate-${scheduleId}`, // Ensures uniqueness
+      removeOnComplete: true,
+      removeOnFail: true
+    });
+    break;
+
+  case 'once':
+    const delayMs = Math.max(0, new Date(schedule.schedule.startDate) - Date.now());
+    await scheduleQueue.add('process-schedule', { scheduleId }, {
+      delay: delayMs,
+      jobId: `once-${scheduleId}`, // Ensures uniqueness
+      removeOnComplete: true,
+      removeOnFail: true
+    });
+    break;
+
+  case 'recurring':
+    if (schedule.schedule.cronExpression) {
+      const job = cron.schedule(schedule.schedule.cronExpression, async () => {
+        await scheduleQueue.add('process-schedule', { scheduleId }, {
+          jobId: `recurring-${scheduleId}-${Date.now()}`, // Optional: for deduplication prevention per execution
+          removeOnComplete: true,
+          removeOnFail: true
+        });
+      }, { timezone: 'America/Los_Angeles' });
+      activeJobs.set(scheduleId, job);
     }
+    break;
+
+  case 'interval':
+    if (schedule.schedule.interval?.value > 0) {
+      const intervalMs = schedule.delays?.delayofsleep > 0 
+        ? schedule.delays.delayofsleep * 60 * 1000
+        : calculateIntervalMs(schedule.schedule.interval);
+
+      const jobId = `interval-${scheduleId}`;
+   const jobs = await scheduleQueue.getJobSchedulers();
+      const existingJob = jobs.find(j => j.id === jobId);
+      if (existingJob) await scheduleQueue.removeJobScheduler(existingJob.key);
+      await scheduleQueue.add('process-schedule', { scheduleId }, {
+        repeat: { every: intervalMs },
+        jobId,
+        removeOnComplete: true,
+        removeOnFail: true
+      });
+
+      activeJobs.set(scheduleId, {
+        stop: async () => {
+          const jobs = await scheduleQueue.getJobSchedulers();
+          const job = jobs.find(j => j.id === jobId);
+          if (job) await scheduleQueue.removeJobScheduler(job.key);
+        }
+      });
+    }
+    break;
+}
+
     return true;
   } catch (error) {
     console.error(`Error setting up schedule job ${scheduleId}:`, error);
@@ -347,11 +363,11 @@ const scheduleWorker = new Worker('schedule-processing', async (job) => {
   }
 }, {
   connection: REDIS_CONFIG,
-  concurrency: 5,
+  concurrency: 1,
   settings: {
       maxStalledCount: 0,
       lockRenewTime: 30000,
-      stalledInterval: 0
+      stalledInterval: 30000
     }
 });
 
@@ -403,18 +419,19 @@ scheduleWorker.on('failed', (job, err) => {
       .populate('selectedAccounts', 'email channelTitle status')
       .lean();
 
+    
     const comments = await CommentModel.find({
       'metadata.scheduleId': scheduleId
     }).sort({ createdAt: -1 }).limit(100);
-
+    console.log("updateeeeeeShechdule",updatedSchedule);
     const detailData = {
       schedule: updatedSchedule,
       comments
     };
 
     // 🧹 Clear old cache and set updated one
-    await cacheService.deleteUserData(updatedSchedule.user._id.toString(), `schedule:${scheduleId}`);
-    await cacheService.setUserData(updatedSchedule.user._id.toString(), `schedule:${scheduleId}`, detailData, 300);
+    await cacheService.deleteUserData(updatedSchedule.user.toString(), `schedule:${scheduleId}`);
+    await cacheService.setUserData(updatedSchedule.user.toString(), `schedule:${scheduleId}`, detailData, 5);
 
     // 🎯 Update YouTube account stats
     let updateFields = {
@@ -474,7 +491,7 @@ scheduleWorker.on('failed', (job, err) => {
   }
 }, {
   connection: REDIS_CONFIG,
-  concurrency: 30,
+  concurrency: 1,
   limiter: { max: 100, duration: 1000 }
 });
 
@@ -505,29 +522,36 @@ scheduleWorker.on('failed', (job, err) => {
  * Optimized schedule processing
  */
 async function optimizedProcessSchedule(scheduleId) {
+    const lockKey = `schedule_processing:${scheduleId}`;
+  const lockValue = `${Date.now()}`;
+  let lockAcquired = false;
   try {
     // Ensure Redis connection
     if (!redisClient.isOpen) await redisClient.connect();
 
-    // 🔥 Add schedule execution lock to prevent double processing within same schedule
-    const lockKey = `schedule_processing:${scheduleId}`;
-    const lockValue = `${Date.now()}`;
-    
+
     try {
       // Try to acquire lock (expires in 10 seconds)
-      const lockAcquired = await redisClient.set(lockKey, lockValue, { 
+    lockAcquired = await redisClient.set(lockKey, lockValue, { 
         EX: 10, 
         NX: true 
       });
       
       if (!lockAcquired) {
+         const currentLock = await redisClient.get(lockKey);
         console.log(`[Schedule ${scheduleId}] Already being processed, skipping`);
         return;
       }
     } catch (lockError) {
       console.error(`[Schedule ${scheduleId}] Error acquiring lock:`, lockError);
       return;
+    }finally {
+    // Only remove the lock if we still own it
+    const currentValue = await redisClient.get(lockKey);
+    if (currentValue === lockValue) {
+      await redisClient.del(lockKey);
     }
+  }
 
     // Check Redis cache
     let cachedSchedule;
@@ -647,7 +671,7 @@ async function optimizedProcessSchedule(scheduleId) {
 
   } catch (error) {
     console.error(`[Schedule ${scheduleId}] Error processing schedule:`, error);
-    
+  
     try {
       const currentStatus = await ScheduleModel.findById(scheduleId).select('status').lean();
       
@@ -676,7 +700,12 @@ async function optimizedProcessSchedule(scheduleId) {
     }
     
     return false;
+  } finally {
+  const currentValue = await redisClient.get(lockKey);
+  if (currentValue === lockValue) {
+    await redisClient.del(lockKey);
   }
+}
 }
 
 /**
@@ -693,9 +722,9 @@ async function optimizedAccountProcessing(schedule, targetVideos) {
     return false;
   }
 
-  await Promise.all([
-    processCommentsForAccounts(accounts, targetVideos, schedule)
-  ]);
+
+  await  processCommentsForAccounts(accounts, targetVideos, schedule)
+  
 }
 
 /**
@@ -738,18 +767,20 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     return;
   }
 
-  try {
-    // Get lastUsedAccount from Redis for this specific schedule
-    const lastUsedKey = `schedule:${schedule._id}:lastUsedAccount`;
-    const lastUsedAccountId = await redisClient.get(lastUsedKey);
-    
-    console.log(`[Schedule ${schedule._id}] Last used account from Redis:`, lastUsedAccountId);
-    console.log(`[Schedule ${schedule._id}] Available accounts:`, accounts.map(a => a._id.toString()));
+  const lockKey = `schedule:${schedule._id}:comment-lock`;
+  const gotLock = await redisClient.set(lockKey, '1', { NX: true, EX: 10 });
 
-    // Find next account that wasn't the last used one for this schedule
-    let nextAccount = accounts.find(acc => acc._id.toString() !== lastUsedAccountId);
-    
-    // If all accounts were last used (single account case), use the first one
+  if (!gotLock) {
+    console.log(`[Schedule ${schedule._id}] Another comment is already being processed. Skipping.`);
+    return;
+  }
+
+  try {
+    const indexKey = `schedule:${schedule._id}:accountIndex`;
+    let index = parseInt(await redisClient.get(indexKey)) || 0;
+    let nextAccount = accounts[index % accounts.length];
+    await redisClient.set(indexKey, (index + 1) % accounts.length);
+
     if (!nextAccount) {
       nextAccount = accounts[0];
       console.log(`[Schedule ${schedule._id}] Using first account as fallback`);
@@ -760,9 +791,28 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
       return;
     }
 
-    console.log(`[Schedule ${schedule._id}] Selected account:`, nextAccount._id.toString());
+    const recentKey = `schedule:${schedule._id}:recentAccounts`;
+   const recentAccounts = await redisClient.lRange(recentKey, 0, 4);
+
+
+    if (recentAccounts.includes(nextAccount._id.toString())) {
+      console.log(`[Schedule ${schedule._id}] Account ${nextAccount._id} was recently used. Skipping.`);
+      return;
+    }
+
+    console.log(`[Schedule ${schedule._id}] Selected account: ${nextAccount._id.toString()}`);
 
     const randomVideo = targetVideos[Math.floor(Math.random() * targetVideos.length)];
+
+    const cooldownKey = `account:${nextAccount._id}:cooldown`;
+    const cooldown = await redisClient.get(cooldownKey);
+    if (cooldown) {
+      const ttl = await redisClient.ttl(cooldownKey);
+      console.log(`Account ${nextAccount._id} is in cooldown. TTL: ${ttl}s. Skipping comment creation.`);
+      return;
+    }
+
+    await redisClient.set(cooldownKey, '1', { EX: 30 });
 
     const comment = {
       user: schedule.user,
@@ -787,27 +837,31 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
           $set: { lastUsedAccount: nextAccount._id },
         }
       ),
-      // Save lastUsedAccount to Redis for this schedule
-      redisClient.set(lastUsedKey, nextAccount._id.toString(), { EX: 86400 }) // 24 hour expiry
+      redisClient.lPush(recentKey, nextAccount._id.toString()),
+  redisClient.lTrim(recentKey, 0, 4),
+  redisClient.expire(recentKey, 3600)
     ]);
 
-    await commentQueue.add('post-comment', {
-      commentId: createdComment._id,
-      scheduleId: schedule._id
-    }, {
-      delay: calculateOptimizedDelay(schedule.delays),
-      attempts: 1,
-      backoff: { type: 'exponential', delay: 3000 },
-    });
+   const jobId = `post-comment-${createdComment._id.toString()}`;
+
+await commentQueue.add('post-comment', {
+  commentId: createdComment._id,
+  scheduleId: schedule._id
+}, {
+  jobId,  // This ensures only one job with this ID exists in the queue at a time
+  delay: calculateOptimizedDelay(schedule.delays),
+  attempts: 1,
+  backoff: { type: 'exponential', delay: 3000 },
+});
 
     console.log(`[Schedule ${schedule._id}] Queued 1 comment for account ${nextAccount._id}`);
-    
+
   } catch (error) {
     console.error(`[Schedule ${schedule._id}] Error managing account usage:`, error);
-    console.log(`[Schedule ${schedule._id}] Skipping comment creation due to Redis error`);
     return;
   }
 }
+
 
 
 /**
@@ -1021,6 +1075,7 @@ function setupImmediateCommentsProcessor() {
         await commentQueue.add('post-immediate-comment', {
           commentId: comment._id.toString()
         }, {
+            jobId: `post-immediate-comment-${comment._id.toString()}`,
           attempts: 1,
           backoff: { type: 'exponential', delay: 3000 }
         });
