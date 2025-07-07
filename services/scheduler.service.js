@@ -12,13 +12,12 @@ const { cacheService } = require('../services/cacheService');
 require('dotenv').config();
 // Configuration constants
 const REDIS_CONFIG = {
-// host: process.env.REDIS_HOST || 'localhost',
-//       port: process.env.REDIS_PORT || 6379,
- url: process.env.REDIS_URL,
-  socket: {
-    tls: true, // Required for Upstash or Railway public Redis
-    connectTimeout: 10000
-  }
+  host: redisURL.hostname,
+  port: Number(redisURL.port),
+  username: redisURL.username,
+  password: redisURL.password,
+  tls: redisURL.protocol === 'rediss:',
+  family: 0 // required for Railway DNS (IPv6)
 };
 
 const QUEUE_CONFIG = {
@@ -30,7 +29,6 @@ const QUEUE_CONFIG = {
     removeOnFail: 1000
   }
 };
-
 // Redis client singleton
 let redisClient;
 
