@@ -12,7 +12,7 @@ const { cacheService } = require('../services/cacheService');
 require('dotenv').config();
 const redisURL = new URL(process.env.REDIS_URL);
 // Configuration constants
-const REDIS_IOREDIS_CONFIG = {
+const REDIS_CONFIG = {
   host: redisURL.hostname,
   port: Number(redisURL.port),
   username: redisURL.username,
