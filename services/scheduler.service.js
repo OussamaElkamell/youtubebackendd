@@ -14,7 +14,10 @@ require('dotenv').config();
 const REDIS_CONFIG = process.env.NODE_ENV === 'production'
   ? {
       url: process.env.REDIS_URL, // full Redis connection string for production
-      tls:false
+      socket: {
+         connectTimeout: 10000,
+  reconnectStrategy: retries => Math.min(retries * 100, 3000),
+}
     }
   : {
       host: process.env.REDIS_HOST || 'localhost',
