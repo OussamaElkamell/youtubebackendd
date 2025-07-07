@@ -12,17 +12,17 @@ const { cacheService } = require('../services/cacheService');
 require('dotenv').config();
 const redisURL = new URL(process.env.REDIS_URL);
 // Configuration constants
-const REDIS_CONFIG = {
+const REDIS_IOREDIS_CONFIG = {
   host: redisURL.hostname,
   port: Number(redisURL.port),
   username: redisURL.username,
   password: redisURL.password,
   tls: redisURL.protocol === 'rediss:',
-  family: 0 // required for Railway DNS (IPv6)
+  family: 0
 };
 
 const QUEUE_CONFIG = {
-  connection: REDIS_CONFIG,
+  connection: REDIS_IOREDIS_CONFIG,
   defaultJobOptions: {
     attempts: 1,
     backoff: { type: 'exponential', delay: 3000 },
@@ -53,21 +53,20 @@ async function initRedis() {
     redisClient = createClient({
       url: process.env.REDIS_URL,
       socket: {
-        tls: process.env.NODE_ENV === 'production',
-        reconnectStrategy: (retries) => Math.min(retries * 100, 5000)
+        tls: redisURL.protocol === 'rediss:',
+        connectTimeout: 10000,
+        reconnectStrategy: retries => Math.min(retries * 100, 5000)
       },
-      commandsQueueMaxLength: 1000,
-      disableClientInfo: true,
-      disableOfflineQueue: true,
-      legacyMode: false
+      disableOfflineQueue: true
     });
 
     redisClient.on('error', (err) => console.error('Redis Client Error:', err));
+
     await redisClient.connect();
-    console.log('Redis client connected successfully');
+    console.log('✅ Redis client connected');
     return true;
   } catch (error) {
-    console.error('Failed to connect to Redis:', error);
+    console.error('❌ Failed to connect to Redis:', error);
     return false;
   }
 }
