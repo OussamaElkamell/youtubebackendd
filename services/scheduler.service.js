@@ -533,7 +533,7 @@ async function optimizedProcessSchedule(scheduleId) {
     try {
       // Try to acquire lock (expires in 10 seconds)
     lockAcquired = await redisClient.set(lockKey, lockValue, { 
-        EX: 10, 
+        EX: 15, 
         NX: true 
       });
       
@@ -778,41 +778,47 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
   try {
     const indexKey = `schedule:${schedule._id}:accountIndex`;
     let index = parseInt(await redisClient.get(indexKey)) || 0;
-    let nextAccount = accounts[index % accounts.length];
-    await redisClient.set(indexKey, (index + 1) % accounts.length);
+
+    const lastUsedKey = `schedule:${schedule._id}:lastUsedAccount`;
+    const lastUsedAccount = await redisClient.get(lastUsedKey);
+
+    let attempts = 0;
+    let nextAccount = null;
+
+    while (attempts < accounts.length) {
+      const candidate = accounts[index % accounts.length];
+      index = (index + 1) % accounts.length;
+      attempts++;
+
+      if (!candidate) continue;
+
+      if (candidate._id.toString() === lastUsedAccount) {
+        console.log(`[Schedule ${schedule._id}] Account ${candidate._id} was used last. Avoiding consecutive use.`);
+        continue;
+      }
+
+      const cooldownKey = `account:${candidate._id}:cooldown`;
+      const cooldown = await redisClient.get(cooldownKey);
+      if (cooldown) {
+        const ttl = await redisClient.ttl(cooldownKey);
+        console.log(`[Schedule ${schedule._id}] Account ${candidate._id} is in cooldown. TTL: ${ttl}s. Skipping.`);
+        continue;
+      }
+
+      nextAccount = candidate;
+      break;
+    }
+
+    await redisClient.set(indexKey, index);
 
     if (!nextAccount) {
-      nextAccount = accounts[0];
-      console.log(`[Schedule ${schedule._id}] Using first account as fallback`);
-    }
-
-    if (!nextAccount) {
-      console.log(`[Schedule ${schedule._id}] No available accounts`);
+      console.log(`[Schedule ${schedule._id}] No available accounts after checking all.`);
       return;
     }
-
-    const recentKey = `schedule:${schedule._id}:recentAccounts`;
-   const recentAccounts = await redisClient.lRange(recentKey, 0, 4);
-
-
-    if (recentAccounts.includes(nextAccount._id.toString())) {
-      console.log(`[Schedule ${schedule._id}] Account ${nextAccount._id} was recently used. Skipping.`);
-      return;
-    }
-
-    console.log(`[Schedule ${schedule._id}] Selected account: ${nextAccount._id.toString()}`);
 
     const randomVideo = targetVideos[Math.floor(Math.random() * targetVideos.length)];
 
-    const cooldownKey = `account:${nextAccount._id}:cooldown`;
-    const cooldown = await redisClient.get(cooldownKey);
-    if (cooldown) {
-      const ttl = await redisClient.ttl(cooldownKey);
-      console.log(`Account ${nextAccount._id} is in cooldown. TTL: ${ttl}s. Skipping comment creation.`);
-      return;
-    }
-
-    await redisClient.set(cooldownKey, '1', { EX: 30 });
+    await redisClient.set(`account:${nextAccount._id}:cooldown`, '1', { EX: 30 });
 
     const comment = {
       user: schedule.user,
@@ -826,10 +832,7 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
 
     const [createdComment] = await Promise.all([
       CommentModel.create(comment),
-      YouTubeAccountModel.updateOne(
-        { _id: nextAccount._id },
-        { lastUsed: new Date() }
-      ),
+      YouTubeAccountModel.updateOne({ _id: nextAccount._id }, { lastUsed: new Date() }),
       ScheduleModel.updateOne(
         { _id: schedule._id },
         {
@@ -837,28 +840,25 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
           $set: { lastUsedAccount: nextAccount._id },
         }
       ),
-      redisClient.lPush(recentKey, nextAccount._id.toString()),
-  redisClient.lTrim(recentKey, 0, 4),
-  redisClient.expire(recentKey, 3600)
+      redisClient.set(lastUsedKey, nextAccount._id.toString(), { EX: 3600 }), // 🆕 Save for next loop
     ]);
 
-   const jobId = `post-comment-${createdComment._id.toString()}`;
+    const jobId = `post-comment-${createdComment._id.toString()}`;
 
-await commentQueue.add('post-comment', {
-  commentId: createdComment._id,
-  scheduleId: schedule._id
-}, {
-  jobId,  // This ensures only one job with this ID exists in the queue at a time
-  delay: calculateOptimizedDelay(schedule.delays),
-  attempts: 1,
-  backoff: { type: 'exponential', delay: 3000 },
-});
+    await commentQueue.add('post-comment', {
+      commentId: createdComment._id,
+      scheduleId: schedule._id
+    }, {
+      jobId,
+      delay: calculateOptimizedDelay(schedule.delays),
+      attempts: 1,
+      backoff: { type: 'exponential', delay: 3000 },
+    });
 
     console.log(`[Schedule ${schedule._id}] Queued 1 comment for account ${nextAccount._id}`);
 
   } catch (error) {
     console.error(`[Schedule ${schedule._id}] Error managing account usage:`, error);
-    return;
   }
 }
 
