@@ -11,18 +11,12 @@ const { assignRandomProxy } = require('./proxy.service');
 const { cacheService } = require('../services/cacheService');
 require('dotenv').config();
 // Configuration constants
-const REDIS_CONFIG = process.env.NODE_ENV === 'production'
-  ? {
-      url: process.env.REDIS_URL, // full Redis connection string for production
-      socket: {
-         connectTimeout: 10000,
-  reconnectStrategy: retries => Math.min(retries * 100, 3000),
-}
-    }
-  : {
-      host: process.env.REDIS_HOST || 'localhost',
-      port: process.env.REDIS_PORT,
-    };
+const REDIS_CONFIG = {
+// host: process.env.REDIS_HOST || 'localhost',
+//       port: process.env.REDIS_PORT || 6379,
+url: process.env.REDIS_URL
+};
+
 const QUEUE_CONFIG = {
   connection: REDIS_CONFIG,
   defaultJobOptions: {
