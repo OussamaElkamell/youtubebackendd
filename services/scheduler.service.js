@@ -9,17 +9,24 @@ const ApiProfile = require('../models/ApiProfile');
 const youtubeService = require('./youtube.service');
 const { assignRandomProxy } = require('./proxy.service');
 const { cacheService } = require('../services/cacheService');
+const Redis = require('ioredis');
 require('dotenv').config();
 const redisURL = new URL(process.env.REDIS_URL);
 
-const REDIS_CONFIG = {
-  host: redisURL.hostname,
-  port: Number(redisURL.port),
-  username: redisURL.username,
-  password: redisURL.password,
-  tls: redisURL.protocol === 'rediss:',
-  family: 0
-};
+const REDIS_CONFIG = process.env.NODE_ENV === 'production'
+  ? {
+      host: redisURL.hostname,
+      port: Number(redisURL.port),
+      username: redisURL.username,
+      password: redisURL.password,
+      tls: redisURL.protocol === 'rediss:',
+      family: 0,
+    }
+  : {
+      host: process.env.REDIS_HOST || 'localhost',
+      port: process.env.REDIS_PORT || 6379,
+     
+    };
 
 const QUEUE_CONFIG = {
   connection: REDIS_CONFIG,
@@ -46,6 +53,7 @@ let lastUsedIndex = -1;
 /**
  * Initialize Redis connection with optimized settings
  */
+const monitorRedis = new Redis(process.env.REDIS_URL + '?family=0'); // for Railway DNS
 async function initRedis() {
   try {
     if (redisClient?.isOpen) return true;
@@ -60,6 +68,16 @@ async function initRedis() {
       disableOfflineQueue: true
     });
 
+
+// monitorRedis.monitor((err, monitor) => {
+//   if (err) throw err;
+//   console.log('🔍 Redis MONITOR enabled...');
+//   monitor.on('monitor', (time, args) => {
+//     if (args.some(arg => arg.includes('comment-posting'))) {
+//       console.log(`[${time}]`, args);
+//     }
+//   });
+// });
     redisClient.on('error', (err) => console.error('Redis Client Error:', err));
 
     await redisClient.connect();
@@ -98,7 +116,9 @@ async function setupScheduler() {
     ]);
 
     if (!redisReady) throw new Error('Redis connection failed');
-  
+
+
+
     setupWorkers();
     
     const activeSchedules = await ScheduleModel.find({ status: 'active' }).lean();
@@ -108,7 +128,7 @@ async function setupScheduler() {
       activeSchedules.map(schedule => setupScheduleJob(schedule._id))
     );
    
-    setupImmediateCommentsProcessor();
+    // setupImmediateCommentsProcessor();
     setupMaintenanceJob();
     setupMaintenanceSheduler()
     scheduleQuotaReset();
@@ -836,15 +856,13 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
 
     // 📝 Generate unique comment content
     const baseContent = getRandomTemplate(schedule.commentTemplates);
-    const uniqueSuffix = ` • ${new Date().toISOString().slice(11, 19)}`; // HH:MM:SS
-    const finalContent = `${baseContent}${uniqueSuffix}`;
-
+ 
     const comment = {
       user: schedule.user,
       youtubeAccount: nextAccount._id,
       videoId: randomVideo.videoId,
       scheduleId: schedule._id,
-      content: finalContent,
+      content: baseContent,
       status: 'pending',
       metadata: { scheduleId: schedule._id },
     };
