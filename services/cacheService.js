@@ -14,21 +14,35 @@ class CacheService {
   }
 
   async initClient() {
-    if (!this.client) {
+  if (!this.client) {
+    try {
+      const redisURL = new URL(process.env.REDIS_URL);
+
       this.client = createClient({
         url: process.env.REDIS_URL,
         socket: {
-          tls: process.env.NODE_ENV === 'production',
+          tls: redisURL.protocol === 'rediss:', // enable TLS only if using rediss
+          connectTimeout: 10000,
           reconnectStrategy: (retries) => Math.min(retries * 100, 5000)
         }
       });
-      
-      this.client.on('error', (err) => console.error('❌ Cache Redis Client Error:', err));
-      this.client.on('connect', () => console.log('✅ Connected to external Redis cache successfully'));
+
+      this.client.on('error', (err) =>
+        console.error('❌ Cache Redis Client Error:', err)
+      );
+
+      this.client.on('connect', () =>
+        console.log('✅ Connected to external Redis cache successfully')
+      );
+
       await this.client.connect();
+    } catch (err) {
+      console.error('❌ Failed to initialize Redis cache client:', err);
     }
-    return this.client;
   }
+
+  return this.client;
+}
 
   getKey(key) {
     return `${this.keyPrefix}:${key}`;
