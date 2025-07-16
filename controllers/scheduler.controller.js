@@ -106,7 +106,8 @@ const createSchedule = async (req, res, next) => {
       selectedAccounts,
       schedule: scheduleConfig,
       includeEmojis,
-      delays
+      delays,
+      useAI
     } = req.body;
     
     // Validate accounts
@@ -158,7 +159,8 @@ const createSchedule = async (req, res, next) => {
       },
       includeEmojis:includeEmojis,
       status: 'active',
-      interval: scheduleConfig.interval || { value: 1, unit: 'minutes' } // Default interval if not provided
+      interval: scheduleConfig.interval || { value: 1, unit: 'minutes' } ,
+      useAI:useAI
     });
     
     
@@ -210,7 +212,8 @@ const updateSchedule = async (req, res, next) => {
       selectedAccounts,
       schedule: scheduleConfig,
       includeEmojis,
-      delays
+      delays,
+      useAI
     } = req.body;
 
     // 1. Fetch the schedule document
@@ -233,7 +236,7 @@ const updateSchedule = async (req, res, next) => {
     if (delays) schedule.delays = delays; // ✅ FULL REPLACEMENT
     if (scheduleConfig) schedule.schedule = scheduleConfig; // ✅ FULL REPLACEMENT
     if (includeEmojis) schedule.includeEmojis = includeEmojis; 
-
+    if (useAI) schedule.useAI = useAI; 
     // 3. Validate and update selected accounts
     if (selectedAccounts && selectedAccounts.length > 0) {
       const validAccounts = await YouTubeAccountModel.find({

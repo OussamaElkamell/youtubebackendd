@@ -10,7 +10,13 @@ const youtubeService = require('./youtube.service');
 const { assignRandomProxy } = require('./proxy.service');
 const { cacheService } = require('../services/cacheService');
 const Redis = require('ioredis');
+const https = require('https');
 require('dotenv').config();
+const { OpenAI } = require("openai");
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
 const redisURL = new URL(process.env.REDIS_URL);
 
 const REDIS_CONFIG = process.env.NODE_ENV === 'production'
@@ -388,7 +394,7 @@ const scheduleWorker = new Worker('schedule-processing', async (job) => {
   }
 }, {
   connection: REDIS_CONFIG,
-  concurrency: 1,
+  concurrency: 30,
   settings: {
       maxStalledCount: 0,
       lockRenewTime: 30000,
@@ -516,7 +522,7 @@ scheduleWorker.on('failed', (job, err) => {
   }
 }, {
   connection: REDIS_CONFIG,
-  concurrency: 1,
+  concurrency: 30,
   limiter: { max: 100, duration: 1000 }
 });
 
@@ -650,8 +656,8 @@ async function optimizedProcessSchedule(scheduleId) {
 
     // Validate targets and templates
     const targetVideos = [...schedule.targetVideos];
-    if ((targetVideos.length === 0 && schedule.targetChannels.length === 0) ||
-      schedule.commentTemplates.length === 0) {
+    if ((targetVideos.length === 0 && schedule.targetChannels.length === 0 ) ||
+      schedule.commentTemplates.length === 0 && !schedule.useAI) {
       console.log(`[Schedule ${scheduleId}] No valid targets or templates`);
       await ScheduleModel.updateOne(
         { _id: scheduleId },
@@ -771,40 +777,87 @@ function selectRoundRobinAccount(accounts) {
   lastUsedIndex = nextIndex;
   return accounts[nextIndex];
 }
+async function getYouTubeVideoTitle(videoId) {
+  const apiKey = process.env.YOUTUBE_API_KEY;
 
+  const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${apiKey}`;
+
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let rawData = '';
+      res.on('data', chunk => rawData += chunk);
+      res.on('end', () => {
+        try {
+          const { items } = JSON.parse(rawData);
+          if (items && items.length > 0) {
+            resolve(items[0].snippet.title);
+          } else {
+            reject(new Error('No video found'));
+          }
+        } catch (e) {
+          reject(new Error('Failed to parse response'));
+        }
+      });
+    }).on('error', reject);
+  });
+}
 /**
- * Process comments for accounts
+/**
+ * Generate one YouTube-style comment from a video title using OpenAI
+ * @param {string} title - The title of the YouTube video
+ * @returns {Promise<string>} - The generated comment
  */
+async function generateCommentFromTitle(title) {
+  if (!title) return "Awesome video! 🔥";
+
+  const prompt = `Write one short, enthusiastic YouTube-style comment for a video titled "${title}". Keep it friendly and engaging.`;
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo", // or "gpt-3.5-turbo" if you prefer cheaper
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 50,
+      temperature: 0.9,
+    });
+
+    return response.choices[0].message.content.trim();
+  } catch (error) {
+    console.error("❌ Error generating comment:", error);
+    return "🔥 Loved this video!";
+  }
+}
+
 async function processCommentsForAccounts(accounts, targetVideos, schedule) {
   if (schedule.delays?.delayofsleep > 0) {
     console.log(`[Schedule ${schedule._id}] Skipping comment creation - delay of ${schedule.delays.delayofsleep} minutes active`);
     return;
   }
 
-  const lockKey = `schedule:${schedule._id}:comment-lock`;
+  const indexKey = `schedule:${schedule._id}:accountIndex`;
+  let index = parseInt(await redisClient.get(indexKey)) || 0;
+
+  // 🎯 Avoid repeating the same video
+  const lastUsedVideoKey = `schedule:${schedule._id}:lastUsedVideo`;
+  const lastUsedVideo = await redisClient.get(lastUsedVideoKey);
+
+  let randomVideo;
+  let attempts = 0;
+  do {
+    randomVideo = targetVideos[Math.floor(Math.random() * targetVideos.length)];
+    attempts++;
+  } while (randomVideo.videoId === lastUsedVideo && attempts < 5 && targetVideos.length > 1);
+
+  // Try to lock for this specific video
+  const lockKey = `schedule:${schedule._id}:video:${randomVideo.videoId}:comment-lock`;
   const gotLock = await redisClient.set(lockKey, '1', { NX: true, EX: 30 });
 
   if (!gotLock) {
-    console.log(`[Schedule ${schedule._id}] Another comment is already being processed. Skipping.`);
+    console.log(`[Schedule ${schedule._id}] Another comment is already being processed for video ${randomVideo.videoId}. Skipping.`);
     return;
   }
 
   try {
-    const indexKey = `schedule:${schedule._id}:accountIndex`;
-    let index = parseInt(await redisClient.get(indexKey)) || 0;
-
-    // 🎯 Avoid repeating the same video
-    const lastUsedVideoKey = `schedule:${schedule._id}:lastUsedVideo`;
-    const lastUsedVideo = await redisClient.get(lastUsedVideoKey);
-
-    let randomVideo;
-    let attempts = 0;
-    do {
-      randomVideo = targetVideos[Math.floor(Math.random() * targetVideos.length)];
-      attempts++;
-    } while (randomVideo.videoId === lastUsedVideo && attempts < 5 && targetVideos.length > 1);
-
-    // Set current video as last used
+    // Mark video as recently used
     await redisClient.set(lastUsedVideoKey, randomVideo.videoId, { EX: 600 });
 
     const lastUsedKey = `schedule:${schedule._id}:video:${randomVideo.videoId}:lastUsedAccount`;
@@ -854,9 +907,23 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     await redisClient.set(`account:${nextAccount._id}:cooldown`, '1', { EX: 30 });
     await redisClient.set(lastUsedKey, nextAccount._id.toString(), { EX: 3600 });
 
-    // 📝 Generate unique comment content
-    const baseContent = getRandomTemplate(schedule.commentTemplates);
- 
+    let baseContent;
+    if (schedule.videoTitle) {
+      const title = await getYouTubeVideoTitle(randomVideo.videoId);
+      console.log("Video title:", title);
+
+      baseContent = await generateCommentFromTitle(title);
+      console.log("Comment", baseContent);
+
+      schedule.commentTemplates.push(baseContent);
+      await ScheduleModel.updateOne(
+        { _id: schedule._id },
+        { $push: { commentTemplates: baseContent } }
+      );
+    } else {
+      baseContent = getRandomTemplate(schedule.commentTemplates);
+    }
+
     const comment = {
       user: schedule.user,
       youtubeAccount: nextAccount._id,
@@ -892,11 +959,11 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     });
 
     console.log(`[Schedule ${schedule._id}] Queued comment for account ${nextAccount._id} on video ${randomVideo.videoId}`);
-
   } catch (error) {
     console.error(`[Schedule ${schedule._id}] Error managing account usage:`, error);
   }
 }
+
 
 
 

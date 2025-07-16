@@ -54,6 +54,7 @@ const ScheduleSchema = new mongoose.Schema({
     endDate: Date,
     cronExpression: String, 
     errorMessage: String,
+   
     interval: {
       type: {
         value: { type: Number, required: false },
@@ -62,6 +63,7 @@ const ScheduleSchema = new mongoose.Schema({
       required: false
     }
   },
+   useAI:Boolean,
   delays: {
     minDelay: {
       type: Number,

@@ -3,11 +3,11 @@
   "version": "1.0.0",
   "description": "Backend server for YouTube auto commenter with multi-account support",
   "main": "index.js",
- "scripts": {
-  "start": "node index.js",
-  "dev": "nodemon index.js",
-  "test": "echo \"Error: no test specified\" && exit 1"
-},
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
   "dependencies": {
     "@google-cloud/monitoring": "^5.0.1",
     "axios": "^1.6.0",
@@ -27,6 +27,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^7.6.3",
     "node-cron": "^3.0.2",
+    "openai": "^5.9.0",
     "passport": "^0.6.0",
     "passport-google-oauth20": "^2.0.0",
     "puppeteer": "^22.8.2",
