@@ -394,7 +394,7 @@ const scheduleWorker = new Worker('schedule-processing', async (job) => {
   }
 }, {
   connection: REDIS_CONFIG,
-  concurrency: 1,
+  concurrency: 5,
   settings: {
       maxStalledCount: 0,
       lockRenewTime: 30000,
@@ -522,7 +522,7 @@ scheduleWorker.on('failed', (job, err) => {
   }
 }, {
   connection: REDIS_CONFIG,
-  concurrency: 1,
+  concurrency: 2,
   limiter: { max: 100, duration: 1000 }
 });
 
@@ -831,7 +831,6 @@ async function generateCommentFromTitle(title) {
 
 
 async function processCommentsForAccounts(accounts, targetVideos, schedule) {
-  const VIDEO_BATCH_COUNT =1
   const ACCOUNT_COOLDOWN_SECONDS = 30;
   const VIDEO_REUSE_COOLDOWN_SECONDS = 600;
   const COMMENT_DELAY_SPACING_MS = 1500;
@@ -841,11 +840,33 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     return;
   }
 
+  const shuffledAccounts = [...accounts].sort(() => 0.5 - Math.random());
   const shuffledVideos = [...targetVideos].sort(() => 0.5 - Math.random());
-  const selectedVideos = shuffledVideos.slice(0, VIDEO_BATCH_COUNT);
 
-  for (const video of selectedVideos) {
+  let usedVideos = new Set();
+  let usedAccounts = new Set();
+
+  let i = 0;
+
+  for (const account of shuffledAccounts) {
+    if (!account) continue;
+
+    // Pick next available video not used yet
+    const video = shuffledVideos.find(v => !usedVideos.has(v.videoId));
+    if (!video) {
+      console.log(`[Schedule ${schedule._id}] No more unused videos available for new comments.`);
+      break;
+    }
+
     const videoId = video.videoId;
+    const cooldownKey = `account:${account._id}:video:${videoId}:cooldown`;
+    const cooldown = await redisClient.get(cooldownKey);
+
+    if (cooldown) {
+      console.log(`[Schedule ${schedule._id}] Account ${account._id} is on cooldown for video ${videoId}`);
+      continue;
+    }
+
     const lockKey = `schedule:${schedule._id}:video:${videoId}:comment-lock`;
     const gotLock = await redisClient.set(lockKey, '1', { NX: true, EX: 3 });
 
@@ -855,109 +876,78 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     }
 
     try {
-      const lastUsedKey = `schedule:${schedule._id}:video:${videoId}:lastUsedAccount`;
-      const lastUsedAccount = await redisClient.get(lastUsedKey);
+      usedVideos.add(videoId);
+      usedAccounts.add(account._id.toString());
 
+      await redisClient.set(cooldownKey, '1', { EX: ACCOUNT_COOLDOWN_SECONDS });
+      await redisClient.set(`schedule:${schedule._id}:video:${videoId}:lastUsedAccount`, account._id.toString(), { EX: 3600 });
       await redisClient.set(`schedule:${schedule._id}:lastUsedVideo`, videoId, { EX: VIDEO_REUSE_COOLDOWN_SECONDS });
 
-      // Filter eligible accounts
-      const eligibleAccounts = [];
-      for (const acc of accounts) {
-        if (!acc || (lastUsedAccount && acc._id.toString() === lastUsedAccount)) continue;
-
-        const cooldownKey = `account:${acc._id}:video:${videoId}:cooldown`;
-        const cooldown = await redisClient.get(cooldownKey);
-        if (!cooldown) {
-          eligibleAccounts.push(acc);
+      let baseContent;
+      if (schedule.useAI) {
+        const title = await getYouTubeVideoTitle(videoId);
+        baseContent = await generateCommentFromTitle(title);
+        if (!schedule.commentTemplates.includes(baseContent)) {
+          schedule.commentTemplates.push(baseContent);
+          await ScheduleModel.updateOne(
+            { _id: schedule._id },
+            { $push: { commentTemplates: baseContent } }
+          );
         }
+      } else {
+        baseContent = getRandomTemplate(schedule.commentTemplates);
       }
 
-      if (eligibleAccounts.length === 0) {
-        console.log(`[Schedule ${schedule._id}] No eligible accounts found for video ${videoId}.`);
+      const comment = {
+        user: schedule.user,
+        youtubeAccount: account._id,
+        videoId,
+        scheduleId: schedule._id,
+        content: baseContent,
+        status: 'pending',
+        metadata: { scheduleId: schedule._id },
+      };
+
+      const [createdComment] = await Promise.all([
+        CommentModel.create(comment),
+        YouTubeAccountModel.updateOne({ _id: account._id }, { lastUsed: new Date() }),
+        ScheduleModel.updateOne(
+          { _id: schedule._id },
+          {
+            $inc: { 'progress.totalComments': 1 },
+            $set: { lastUsedAccount: account._id },
+          }
+        )
+      ]);
+
+      if (!createdComment) {
+        console.error(`[Schedule ${schedule._id}] Failed to create comment for account ${account._id}`);
         continue;
       }
 
-      let commentsCreated = 0;
+      const jobId = `post-comment-${createdComment._id.toString()}`;
+      const delay = calculateOptimizedDelay(schedule.delays) + (i * COMMENT_DELAY_SPACING_MS);
 
-      for (let i = 0; i < eligibleAccounts.length; i++) {
-        const nextAccount = eligibleAccounts[i];
+      await commentQueue.add('post-comment', {
+        commentId: createdComment._id,
+        scheduleId: schedule._id
+      }, {
+        jobId,
+        delay,
+        removeOnComplete: true,
+        removeOnFail: true
+      });
 
-        const cooldownKey = `account:${nextAccount._id}:video:${videoId}:cooldown`;
-        await redisClient.set(cooldownKey, '1', { EX: ACCOUNT_COOLDOWN_SECONDS });
-        await redisClient.set(lastUsedKey, nextAccount._id.toString(), { EX: 3600 });
-
-        let baseContent;
-        if (schedule.useAI) {
-          const title = await getYouTubeVideoTitle(videoId);
-          baseContent = await generateCommentFromTitle(title);
-          if (!schedule.commentTemplates.includes(baseContent)) {
-            schedule.commentTemplates.push(baseContent);
-            await ScheduleModel.updateOne(
-              { _id: schedule._id },
-              { $push: { commentTemplates: baseContent } }
-            );
-          }
-        } else {
-          baseContent = getRandomTemplate(schedule.commentTemplates);
-        }
-
-        const comment = {
-          user: schedule.user,
-          youtubeAccount: nextAccount._id,
-          videoId,
-          scheduleId: schedule._id,
-          content: baseContent,
-          status: 'pending',
-          metadata: { scheduleId: schedule._id },
-        };
-
-        try {
-          const [createdComment] = await Promise.all([
-            CommentModel.create(comment),
-            YouTubeAccountModel.updateOne({ _id: nextAccount._id }, { lastUsed: new Date() }),
-            ScheduleModel.updateOne(
-              { _id: schedule._id },
-              {
-                $inc: { 'progress.totalComments': 1 },
-                $set: { lastUsedAccount: nextAccount._id },
-              }
-            )
-          ]);
-
-          if (!createdComment) {
-            console.error(`[Schedule ${schedule._id}] Failed to create comment for account ${nextAccount._id}`);
-            continue;
-          }
-
-          const jobId = `post-comment-${createdComment._id.toString()}`;
-          const delay = calculateOptimizedDelay(schedule.delays) + (i * COMMENT_DELAY_SPACING_MS);
-
-          await commentQueue.add('post-comment', {
-            commentId: createdComment._id,
-            scheduleId: schedule._id
-          }, {
-            jobId,
-            delay,
-            removeOnComplete: true,
-            removeOnFail: true
-          });
-
-          commentsCreated++;
-          console.log(`[Schedule ${schedule._id}] Queued comment by account ${nextAccount._id} on video ${videoId} with delay ${delay}ms`);
-
-        } catch (err) {
-          console.error(`[Schedule ${schedule._id}] Error creating comment for account ${nextAccount._id}:`, err);
-        }
-      }
-
-      console.log(`[Schedule ${schedule._id}] Finished video ${videoId}. ${commentsCreated}/${eligibleAccounts.length} comments created.`);
+      console.log(`[Schedule ${schedule._id}] Queued comment by account ${account._id} on video ${videoId} with delay ${delay}ms`);
+      i++;
 
     } catch (err) {
-      console.error(`[Schedule ${schedule._id}] Error while processing video ${video.videoId}:`, err);
+      console.error(`[Schedule ${schedule._id}] Error processing comment by account ${account._id} for video ${videoId}:`, err);
     }
   }
-}
 
+  console.log(`[Schedule ${schedule._id}] Distributed ${i} comments across ${usedVideos.size} videos`);
+}
 
 
 
