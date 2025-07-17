@@ -394,7 +394,7 @@ const scheduleWorker = new Worker('schedule-processing', async (job) => {
   }
 }, {
   connection: REDIS_CONFIG,
-  concurrency: 30,
+  concurrency: 1,
   settings: {
       maxStalledCount: 0,
       lockRenewTime: 30000,
@@ -522,7 +522,7 @@ scheduleWorker.on('failed', (job, err) => {
   }
 }, {
   connection: REDIS_CONFIG,
-  concurrency: 30,
+  concurrency: 1,
   limiter: { max: 100, duration: 1000 }
 });
 
