@@ -742,10 +742,10 @@ async function optimizedAccountProcessing(schedule, targetVideos) {
     );
     return false;
   }
-  await Promise.all([
+
     // assignProxiesToAccounts(accounts, schedule.user),
     processCommentsForAccounts(accounts, targetVideos, schedule)
-  ]);
+ 
 }
 
 
@@ -831,7 +831,7 @@ async function generateCommentFromTitle(title) {
 
 
 async function processCommentsForAccounts(accounts, targetVideos, schedule) {
-  const VIDEO_BATCH_COUNT = targetVideos.length;
+  const VIDEO_BATCH_COUNT =1
   const ACCOUNT_COOLDOWN_SECONDS = 30;
   const VIDEO_REUSE_COOLDOWN_SECONDS = 600;
   const COMMENT_DELAY_SPACING_MS = 1500;
