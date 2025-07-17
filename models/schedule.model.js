@@ -63,7 +63,11 @@ const ScheduleSchema = new mongoose.Schema({
       required: false
     }
   },
-   useAI:Boolean,
+  useAI: {
+  type: Boolean,
+  default: false
+}
+,
   delays: {
     minDelay: {
       type: Number,
