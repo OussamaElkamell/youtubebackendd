@@ -833,7 +833,8 @@ async function generateCommentFromTitle(title) {
 async function processCommentsForAccounts(accounts, targetVideos, schedule) {
 const VIDEO_BATCH_COUNT = targetVideos.length;
 
-const ACCOUNT_COOLDOWN_SECONDS = 30;
+ACCOUNT_COOLDOWN_SECONDS = Math.max(10, Math.floor(300 / accounts.length));
+
 const VIDEO_REUSE_COOLDOWN_SECONDS = 600;
 const COMMENT_DELAY_SPACING_MS = 1500; // delay between accounts (natural posting feel)
   if (schedule.delays?.delayofsleep > 0) {
