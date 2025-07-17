@@ -831,25 +831,21 @@ async function generateCommentFromTitle(title) {
 
 
 async function processCommentsForAccounts(accounts, targetVideos, schedule) {
-const VIDEO_BATCH_COUNT = targetVideos.length;
+  const VIDEO_BATCH_COUNT = targetVideos.length;
+  const ACCOUNT_COOLDOWN_SECONDS = 30;
+  const VIDEO_REUSE_COOLDOWN_SECONDS = 600;
+  const COMMENT_DELAY_SPACING_MS = 1500;
 
-ACCOUNT_COOLDOWN_SECONDS = 30
-
-const VIDEO_REUSE_COOLDOWN_SECONDS = 600;
-const COMMENT_DELAY_SPACING_MS = 1500; // delay between accounts (natural posting feel)
   if (schedule.delays?.delayofsleep > 0) {
     console.log(`[Schedule ${schedule._id}] Skipping comment creation - delay of ${schedule.delays.delayofsleep} minutes active`);
     return;
   }
-
-  const usedVideoIds = new Set();
 
   const shuffledVideos = [...targetVideos].sort(() => 0.5 - Math.random());
   const selectedVideos = shuffledVideos.slice(0, VIDEO_BATCH_COUNT);
 
   for (const video of selectedVideos) {
     const videoId = video.videoId;
-
     const lockKey = `schedule:${schedule._id}:video:${videoId}:comment-lock`;
     const gotLock = await redisClient.set(lockKey, '1', { NX: true, EX: 3 });
 
@@ -866,14 +862,10 @@ const COMMENT_DELAY_SPACING_MS = 1500; // delay between accounts (natural postin
 
       // Filter eligible accounts
       const eligibleAccounts = [];
-
       for (const acc of accounts) {
-        if (!acc || (lastUsedAccount && acc._id.toString() === lastUsedAccount)) {
-          continue;
-        }
+        if (!acc || (lastUsedAccount && acc._id.toString() === lastUsedAccount)) continue;
 
         const cooldownKey = `account:${acc._id}:video:${videoId}:cooldown`;
-
         const cooldown = await redisClient.get(cooldownKey);
         if (!cooldown) {
           eligibleAccounts.push(acc);
@@ -885,11 +877,13 @@ const COMMENT_DELAY_SPACING_MS = 1500; // delay between accounts (natural postin
         continue;
       }
 
-      // Process all eligible accounts sequentially with spacing
+      let commentsCreated = 0;
+
       for (let i = 0; i < eligibleAccounts.length; i++) {
         const nextAccount = eligibleAccounts[i];
 
-        await redisClient.set(`account:${nextAccount._id}:cooldown`, '1', { EX: ACCOUNT_COOLDOWN_SECONDS });
+        const cooldownKey = `account:${nextAccount._id}:video:${videoId}:cooldown`;
+        await redisClient.set(cooldownKey, '1', { EX: ACCOUNT_COOLDOWN_SECONDS });
         await redisClient.set(lastUsedKey, nextAccount._id.toString(), { EX: 3600 });
 
         let baseContent;
@@ -917,33 +911,47 @@ const COMMENT_DELAY_SPACING_MS = 1500; // delay between accounts (natural postin
           metadata: { scheduleId: schedule._id },
         };
 
-        const [createdComment] = await Promise.all([
-          CommentModel.create(comment),
-          YouTubeAccountModel.updateOne({ _id: nextAccount._id }, { lastUsed: new Date() }),
-          ScheduleModel.updateOne(
-            { _id: schedule._id },
-            {
-              $inc: { 'progress.totalComments': 1 },
-              $set: { lastUsedAccount: nextAccount._id },
-            }
-          )
-        ]);
+        try {
+          const [createdComment] = await Promise.all([
+            CommentModel.create(comment),
+            YouTubeAccountModel.updateOne({ _id: nextAccount._id }, { lastUsed: new Date() }),
+            ScheduleModel.updateOne(
+              { _id: schedule._id },
+              {
+                $inc: { 'progress.totalComments': 1 },
+                $set: { lastUsedAccount: nextAccount._id },
+              }
+            )
+          ]);
 
-        const jobId = `post-comment-${createdComment._id.toString()}`;
-        const delay = calculateOptimizedDelay(schedule.delays) + (i * COMMENT_DELAY_SPACING_MS);
+          if (!createdComment) {
+            console.error(`[Schedule ${schedule._id}] Failed to create comment for account ${nextAccount._id}`);
+            continue;
+          }
 
-        await commentQueue.add('post-comment', {
-          commentId: createdComment._id,
-          scheduleId: schedule._id
-        }, {
-          jobId,
-          delay,
-          removeOnComplete: true,
-          removeOnFail: true
-        });
+          const jobId = `post-comment-${createdComment._id.toString()}`;
+          const delay = calculateOptimizedDelay(schedule.delays) + (i * COMMENT_DELAY_SPACING_MS);
 
-        console.log(`[Schedule ${schedule._id}] Queued comment by account ${nextAccount._id} on video ${videoId} with delay ${delay}ms`);
+          await commentQueue.add('post-comment', {
+            commentId: createdComment._id,
+            scheduleId: schedule._id
+          }, {
+            jobId,
+            delay,
+            removeOnComplete: true,
+            removeOnFail: true
+          });
+
+          commentsCreated++;
+          console.log(`[Schedule ${schedule._id}] Queued comment by account ${nextAccount._id} on video ${videoId} with delay ${delay}ms`);
+
+        } catch (err) {
+          console.error(`[Schedule ${schedule._id}] Error creating comment for account ${nextAccount._id}:`, err);
+        }
       }
+
+      console.log(`[Schedule ${schedule._id}] Finished video ${videoId}. ${commentsCreated}/${eligibleAccounts.length} comments created.`);
+
     } catch (err) {
       console.error(`[Schedule ${schedule._id}] Error while processing video ${video.videoId}:`, err);
     }
