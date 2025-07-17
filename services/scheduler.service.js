@@ -871,7 +871,8 @@ const COMMENT_DELAY_SPACING_MS = 1500; // delay between accounts (natural postin
           continue;
         }
 
-        const cooldownKey = `account:${acc._id}:cooldown`;
+        const cooldownKey = `account:${acc._id}:video:${videoId}:cooldown`;
+
         const cooldown = await redisClient.get(cooldownKey);
         if (!cooldown) {
           eligibleAccounts.push(acc);
