@@ -830,58 +830,44 @@ async function generateCommentFromTitle(title) {
 }
 
 
+
 async function processCommentsForAccounts(accounts, targetVideos, schedule) {
   const ACCOUNT_COOLDOWN_SECONDS = 30;
   const VIDEO_REUSE_COOLDOWN_SECONDS = 600;
   const COMMENT_DELAY_SPACING_MS = 1500;
 
   if (schedule.delays?.delayofsleep > 0) {
-    console.log(`[Schedule ${schedule._id}] Skipping comment creation - delay of ${schedule.delays.delayofsleep} minutes active`);
+    console.log(`[Schedule ${schedule._id}] Skipping - sleep delay active (${schedule.delays.delayofsleep} mins)`);
     return;
   }
 
-  const shuffledAccounts = [...accounts].sort(() => 0.5 - Math.random());
-  const shuffledVideos = [...targetVideos].sort(() => 0.5 - Math.random());
+  const commentsToCreate = accounts.length;
 
-  let usedVideos = new Set();
-  let usedAccounts = new Set();
-
-  let i = 0;
-
-  for (const account of shuffledAccounts) {
+  for (let i = 0; i < commentsToCreate; i++) {
+    const account = accounts[i];
     if (!account) continue;
 
-    // Pick next available video not used yet
-    const video = shuffledVideos.find(v => !usedVideos.has(v.videoId));
-    if (!video) {
-      console.log(`[Schedule ${schedule._id}] No more unused videos available for new comments.`);
-      break;
-    }
-
+    // Randomly pick a video for this account
+    const video = targetVideos[Math.floor(Math.random() * targetVideos.length)];
     const videoId = video.videoId;
-    const cooldownKey = `account:${account._id}:video:${videoId}:cooldown`;
-    const cooldown = await redisClient.get(cooldownKey);
 
-    if (cooldown) {
-      console.log(`[Schedule ${schedule._id}] Account ${account._id} is on cooldown for video ${videoId}`);
+    const cooldownKey = `account:${account._id}:video:${videoId}:cooldown`;
+    const isInCooldown = await redisClient.get(cooldownKey);
+    if (isInCooldown) {
+      console.log(`[Schedule ${schedule._id}] Skipping account ${account._id} for video ${videoId} (cooldown)`);
       continue;
     }
 
-    const lockKey = `schedule:${schedule._id}:video:${videoId}:comment-lock`;
+    const lockKey = `schedule:${schedule._id}:account:${account._id}:video:${videoId}:lock`;
     const gotLock = await redisClient.set(lockKey, '1', { NX: true, EX: 3 });
-
     if (!gotLock) {
-      console.log(`[Schedule ${schedule._id}] Video ${videoId} is locked. Skipping.`);
+      console.log(`[Schedule ${schedule._id}] Lock active for account ${account._id} on video ${videoId}`);
       continue;
     }
 
     try {
-      usedVideos.add(videoId);
-      usedAccounts.add(account._id.toString());
-
+      // Mark this video-account combo on cooldown
       await redisClient.set(cooldownKey, '1', { EX: ACCOUNT_COOLDOWN_SECONDS });
-      await redisClient.set(`schedule:${schedule._id}:video:${videoId}:lastUsedAccount`, account._id.toString(), { EX: 3600 });
-      await redisClient.set(`schedule:${schedule._id}:lastUsedVideo`, videoId, { EX: VIDEO_REUSE_COOLDOWN_SECONDS });
 
       let baseContent;
       if (schedule.useAI) {
@@ -939,15 +925,15 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
       });
 
       console.log(`[Schedule ${schedule._id}] Queued comment by account ${account._id} on video ${videoId} with delay ${delay}ms`);
-      i++;
 
     } catch (err) {
-      console.error(`[Schedule ${schedule._id}] Error processing comment by account ${account._id} for video ${videoId}:`, err);
+      console.error(`[Schedule ${schedule._id}] Error while processing account ${account._id} and video ${videoId}:`, err);
     }
   }
 
-  console.log(`[Schedule ${schedule._id}] Distributed ${i} comments across ${usedVideos.size} videos`);
+  console.log(`[Schedule ${schedule._id}] All ${commentsToCreate} accounts processed.`);
 }
+
 
 
 

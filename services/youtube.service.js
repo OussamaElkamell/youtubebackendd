@@ -246,7 +246,72 @@ async function postComment(commentId) {
     };
   }
 }
+async function postCommentToConsole(commentId) {
+  try {
+    const comment = await CommentModel.findById(commentId)
+      .populate({
+        path: "youtubeAccount",
+        populate: { path: "proxy" },
+      })
+      .exec();
 
+    if (!comment) throw new Error("Comment not found");
+
+    const account = comment.youtubeAccount;
+    const proxy = account?.proxy;
+
+    if (!account || account.status === null) {
+      console.warn("Invalid account, deleting comment...");
+      await comment.deleteOne();
+      return {
+        success: false,
+        message: "Comment deleted due to invalid account",
+        error: null,
+      };
+    }
+
+    if (account.status !== "active") {
+      throw new Error(`YouTube account is ${account.status}`);
+    }
+
+    const schedule = await ScheduleModel.findById(comment.scheduleId).exec();
+    const includeEmojis = schedule?.includeEmojis === true;
+
+    let content = comment.content?.trim();
+    if (!content) throw new Error("Comment content is empty");
+
+    if (includeEmojis) content = addRandomEmojis(content);
+    content = randomizeSiParamInYoutubeUrl(content);
+
+    if (!content) throw new Error("Comment content empty after processing");
+
+    // Simulate posting the comment
+    console.log("📢 Simulated Comment Post:");
+    console.log(`👤 Account: ${account.username || account._id}`);
+    console.log(`🎯 Video ID: ${comment.videoId}`);
+    console.log(`💬 Content: ${content}`);
+    if (comment.parentId) console.log(`↪️ Replying to: ${comment.parentId}`);
+    if (proxy) console.log(`🌐 Proxy: ${proxy.ip}:${proxy.port}`);
+
+    // Simulate updating usage
+    await ScheduleModel.findByIdAndUpdate(comment.scheduleId, {
+      lastUsedAccount: account._id,
+    });
+
+    return {
+      success: true,
+      message: "Comment simulated and logged to console",
+      error: null,
+    };
+  } catch (error) {
+    console.error("❌ Error simulating comment post:", error.message);
+    return {
+      success: false,
+      message: error.message,
+      error: error.stack,
+    };
+  }
+}
 
 /**
  * Update daily usage counter for a YouTube account
@@ -355,6 +420,7 @@ module.exports = {
   refreshTokenIfNeeded,
   postComment,
   updateDailyUsage,
+   postCommentToConsole,
   getYouTubeClient,
   getRandomUserAgent
 };
