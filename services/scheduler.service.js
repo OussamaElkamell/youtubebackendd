@@ -835,32 +835,37 @@ async function generateCommentFromTitle(title) {
 async function processCommentsForAccounts(accounts, targetVideos, schedule) {
   const betweenAccountsMs = (schedule.delays?.betweenAccounts || 1.5) * 1000;
 
-  const ACCOUNT_COOLDOWN_SECONDS = 30;
-  const VIDEO_REUSE_COOLDOWN_SECONDS = 600;
   const COMMENT_DELAY_SPACING_MS = betweenAccountsMs;
+  const commentsToCreate = accounts.length;
+  const startTime = Date.now();
 
   if (schedule.delays?.delayofsleep > 0) {
     console.log(`[Schedule ${schedule._id}] Skipping - sleep delay active (${schedule.delays.delayofsleep} mins)`);
     return;
   }
 
-  const commentsToCreate = accounts.length;
-  const startTime = Date.now();
-
   let successfulCount = 0;
   let attemptCount = 0;
-  const maxAttempts = accounts.length * 3;
+  const maxAttempts = accounts.length * 20;
+
+  const usedAccountIds = new Set();
 
   while (successfulCount < commentsToCreate && attemptCount < maxAttempts) {
-    const account = accounts[attemptCount % accounts.length];
     attemptCount++;
 
+    // Filter available accounts that haven't been used yet
+    const availableAccounts = accounts.filter(a => !usedAccountIds.has(a._id.toString()));
+    if (availableAccounts.length === 0) {
+      usedAccountIds.clear(); // Reset if all were used
+    }
+
+    const accountPool = availableAccounts.length > 0 ? availableAccounts : accounts;
+    const account = accountPool[Math.floor(Math.random() * accountPool.length)];
     if (!account) continue;
 
     const video = targetVideos[Math.floor(Math.random() * targetVideos.length)];
     const videoId = video.videoId;
 
-    // Prevent consecutive usage of same account on the same video
     const lastUsedAccountIdForVideo = await redisClient.get(`schedule:${schedule._id}:video:${videoId}:lastUsedAccount`);
     if (account._id.toString() === lastUsedAccountIdForVideo) {
       console.log(`[Schedule ${schedule._id}] Skipping account ${account._id} for video ${videoId} (was last used on this video)`);
@@ -933,7 +938,7 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
 
       while (isOnVideoCooldown) {
         console.log(`[Schedule ${schedule._id}] Waiting cooldown for video ${videoId}`);
-        await new Promise((r) => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 1000));
         isOnVideoCooldown = await redisClient.get(videoCooldownKey);
       }
 
@@ -949,15 +954,16 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
         removeOnFail: true
       });
 
-      console.log(`[Schedule ${schedule._id}] Queued comment by account ${account._id} on video ${videoId} with delay ${delay}ms`);
+      usedAccountIds.add(account._id.toString());
       successfulCount++;
+      console.log(`[Schedule ${schedule._id}] Queued comment ${successfulCount}/${commentsToCreate} by account ${account._id} on video ${videoId} with delay ${delay}ms`);
 
     } catch (err) {
       console.error(`[Schedule ${schedule._id}] Error while processing account ${account._id} and video ${videoId}:`, err);
     }
   }
 
-  console.log(`[Schedule ${schedule._id}] Queued ${successfulCount} of ${commentsToCreate} comments.`);
+  console.log(`[Schedule ${schedule._id}] ✅ Queued ${successfulCount} of ${commentsToCreate} comments.`);
 }
 
 
