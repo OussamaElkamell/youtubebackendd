@@ -47,7 +47,7 @@ const QUEUE_CONFIG = {
 let redisClient;
 
 // BullMQ queues
-const commentQueue = new Queue('comment-posting', QUEUE_CONFIG);
+const commentQueue = new Queue('post-comment', QUEUE_CONFIG);
 const scheduleQueue = new Queue('schedule-processing', QUEUE_CONFIG);
 
 // Active jobs tracker
@@ -410,7 +410,7 @@ scheduleWorker.on('failed', (job, err) => {
   console.error(`Schedule job ${job.id} failed:`, err);
 });
   // Comment worker
-  const commentWorker = new Worker('comment-posting', async (job) => {
+  const commentWorker = new Worker('post-comment', async (job) => {
   const { commentId, scheduleId } = job.data;
   console.log("🔄 Processing comment job:", commentId);
 
@@ -459,7 +459,7 @@ scheduleWorker.on('failed', (job, err) => {
       schedule: updatedSchedule,
       comments
     };
-
+    
     // 🧹 Clear old cache and set updated one
     await cacheService.deleteUserData(updatedSchedule.user.toString(), `schedule:${scheduleId}`);
     await cacheService.setUserData(updatedSchedule.user.toString(), `schedule:${scheduleId}`, detailData, 5);
@@ -522,7 +522,8 @@ scheduleWorker.on('failed', (job, err) => {
   }
 }, {
   connection: REDIS_CONFIG,
-  concurrency: 2,
+  concurrency: 1,
+  lockDuration: 60000,
   limiter: { max: 100, duration: 1000 }
 });
 
@@ -832,9 +833,11 @@ async function generateCommentFromTitle(title) {
 
 
 async function processCommentsForAccounts(accounts, targetVideos, schedule) {
+  const betweenAccountsMs = (schedule.delays?.betweenAccounts || 1.5) * 1000;
+
   const ACCOUNT_COOLDOWN_SECONDS = 30;
   const VIDEO_REUSE_COOLDOWN_SECONDS = 600;
-  const COMMENT_DELAY_SPACING_MS = 1500;
+  const COMMENT_DELAY_SPACING_MS = betweenAccountsMs;
 
   if (schedule.delays?.delayofsleep > 0) {
     console.log(`[Schedule ${schedule._id}] Skipping - sleep delay active (${schedule.delays.delayofsleep} mins)`);
@@ -842,14 +845,27 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
   }
 
   const commentsToCreate = accounts.length;
+  const startTime = Date.now();
 
-  for (let i = 0; i < commentsToCreate; i++) {
-    const account = accounts[i];
+  let successfulCount = 0;
+  let attemptCount = 0;
+  const maxAttempts = accounts.length * 3;
+
+  while (successfulCount < commentsToCreate && attemptCount < maxAttempts) {
+    const account = accounts[attemptCount % accounts.length];
+    attemptCount++;
+
     if (!account) continue;
 
-    // Randomly pick a video for this account
     const video = targetVideos[Math.floor(Math.random() * targetVideos.length)];
     const videoId = video.videoId;
+
+    // Prevent consecutive usage of same account on the same video
+    const lastUsedAccountIdForVideo = await redisClient.get(`schedule:${schedule._id}:video:${videoId}:lastUsedAccount`);
+    if (account._id.toString() === lastUsedAccountIdForVideo) {
+      console.log(`[Schedule ${schedule._id}] Skipping account ${account._id} for video ${videoId} (was last used on this video)`);
+      continue;
+    }
 
     const cooldownKey = `account:${account._id}:video:${videoId}:cooldown`;
     const isInCooldown = await redisClient.get(cooldownKey);
@@ -866,8 +882,7 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
     }
 
     try {
-      // Mark this video-account combo on cooldown
-      await redisClient.set(cooldownKey, '1', { EX: ACCOUNT_COOLDOWN_SECONDS });
+      await redisClient.set(cooldownKey, '1', { EX: COMMENT_DELAY_SPACING_MS / 1000 });
 
       let baseContent;
       if (schedule.useAI) {
@@ -899,11 +914,9 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
         YouTubeAccountModel.updateOne({ _id: account._id }, { lastUsed: new Date() }),
         ScheduleModel.updateOne(
           { _id: schedule._id },
-          {
-            $inc: { 'progress.totalComments': 1 },
-            $set: { lastUsedAccount: account._id },
-          }
-        )
+          { $inc: { 'progress.totalComments': 1 } }
+        ),
+        redisClient.set(`schedule:${schedule._id}:video:${videoId}:lastUsedAccount`, account._id.toString(), { EX: 60 })
       ]);
 
       if (!createdComment) {
@@ -911,29 +924,41 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
         continue;
       }
 
+      const targetTime = startTime + successfulCount * COMMENT_DELAY_SPACING_MS;
+      const delay = Math.max(0, targetTime - Date.now());
+
       const jobId = `post-comment-${createdComment._id.toString()}`;
-      const delay = calculateOptimizedDelay(schedule.delays) + (i * COMMENT_DELAY_SPACING_MS);
+      const videoCooldownKey = `video:${videoId}:cooldown`;
+      let isOnVideoCooldown = await redisClient.get(videoCooldownKey);
+
+      while (isOnVideoCooldown) {
+        console.log(`[Schedule ${schedule._id}] Waiting cooldown for video ${videoId}`);
+        await new Promise((r) => setTimeout(r, 1000));
+        isOnVideoCooldown = await redisClient.get(videoCooldownKey);
+      }
+
+      await redisClient.set(videoCooldownKey, '1', { PX: COMMENT_DELAY_SPACING_MS });
 
       await commentQueue.add('post-comment', {
         commentId: createdComment._id,
         scheduleId: schedule._id
       }, {
-        jobId,
-        delay,
+        jobId: jobId,
+        delay: delay,
         removeOnComplete: true,
         removeOnFail: true
       });
 
       console.log(`[Schedule ${schedule._id}] Queued comment by account ${account._id} on video ${videoId} with delay ${delay}ms`);
+      successfulCount++;
 
     } catch (err) {
       console.error(`[Schedule ${schedule._id}] Error while processing account ${account._id} and video ${videoId}:`, err);
     }
   }
 
-  console.log(`[Schedule ${schedule._id}] All ${commentsToCreate} accounts processed.`);
+  console.log(`[Schedule ${schedule._id}] Queued ${successfulCount} of ${commentsToCreate} comments.`);
 }
-
 
 
 
@@ -1188,7 +1213,7 @@ scheduleQueue.on('waiting', (jobId) => {
   console.log(`Job ${jobId} is waiting`);
 });
   
-  const commentQueueEvents = new QueueEvents('comment-posting', {
+  const commentQueueEvents = new QueueEvents('post-comment', {
     connection: REDIS_CONFIG
   });
   
