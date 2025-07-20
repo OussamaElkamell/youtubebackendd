@@ -912,7 +912,7 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
         status: 'pending',
         metadata: { scheduleId: schedule._id },
       };
-
+      const lastUsedTtl = Math.min(3000, Math.max(COMMENT_DELAY_SPACING_MS / 1000 * 3, 60));
       const [createdComment] = await Promise.all([
         CommentModel.create(comment),
         YouTubeAccountModel.updateOne({ _id: account._id }, { lastUsed: new Date() }),
@@ -920,7 +920,7 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
           { _id: schedule._id },
           { $inc: { 'progress.totalComments': 1 } }
         ),
-        redisClient.set(`schedule:${schedule._id}:video:${videoId}:lastUsedAccount`, account._id.toString(), { EX: 60 })
+        redisClient.set(`schedule:${schedule._id}:video:${videoId}:lastUsedAccount`, account._id.toString(), { EX:lastUsedTtl })
       ]);
 
       if (!createdComment) {
