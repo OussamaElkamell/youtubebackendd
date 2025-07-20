@@ -837,7 +837,6 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
 
   const COMMENT_DELAY_SPACING_MS = betweenAccountsMs;
   const commentsToCreate = accounts.length;
-  const startTime = Date.now();
 
   if (schedule.delays?.delayofsleep > 0) {
     console.log(`[Schedule ${schedule._id}] Skipping - sleep delay active (${schedule.delays.delayofsleep} mins)`);
@@ -929,34 +928,39 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
         continue;
       }
 
-      const targetTime = startTime + successfulCount * COMMENT_DELAY_SPACING_MS;
-      const delay = Math.max(0, targetTime - Date.now());
-
       const jobId = `post-comment-${createdComment._id.toString()}`;
       const videoCooldownKey = `video:${videoId}:cooldown`;
-      let isOnVideoCooldown = await redisClient.get(videoCooldownKey);
 
+      // Wait if the video is still on cooldown
+      let isOnVideoCooldown = await redisClient.get(videoCooldownKey);
       while (isOnVideoCooldown) {
         console.log(`[Schedule ${schedule._id}] Waiting cooldown for video ${videoId}`);
         await new Promise(r => setTimeout(r, 1000));
         isOnVideoCooldown = await redisClient.get(videoCooldownKey);
       }
 
+      // Set the video cooldown
       await redisClient.set(videoCooldownKey, '1', { PX: COMMENT_DELAY_SPACING_MS });
 
+      // ⏱ Explicitly wait between accounts
+      if (successfulCount > 0) {
+        console.log(`[Schedule ${schedule._id}] Waiting ${COMMENT_DELAY_SPACING_MS}ms before queuing next comment`);
+        await new Promise(r => setTimeout(r, COMMENT_DELAY_SPACING_MS));
+      }
+
+      // Queue the comment without any internal delay
       await commentQueue.add('post-comment', {
         commentId: createdComment._id,
         scheduleId: schedule._id
       }, {
         jobId: jobId,
-        delay: delay,
         removeOnComplete: true,
         removeOnFail: true
       });
 
       usedAccountIds.add(account._id.toString());
       successfulCount++;
-      console.log(`[Schedule ${schedule._id}] Queued comment ${successfulCount}/${commentsToCreate} by account ${account._id} on video ${videoId} with delay ${delay}ms`);
+      console.log(`[Schedule ${schedule._id}] Queued comment ${successfulCount}/${commentsToCreate} by account ${account._id} on video ${videoId}`);
 
     } catch (err) {
       console.error(`[Schedule ${schedule._id}] Error while processing account ${account._id} and video ${videoId}:`, err);
