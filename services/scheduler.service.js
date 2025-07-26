@@ -522,7 +522,7 @@ scheduleWorker.on('failed', (job, err) => {
   }
 }, {
   connection: REDIS_CONFIG,
-  concurrency: 1,
+  concurrency: 100,
   lockDuration: 60000,
   limiter: { max: 100, duration: 1000 }
 });
