@@ -744,10 +744,14 @@ async function optimizedAccountProcessing(schedule, targetVideos) {
     return false;
   }
 
-    // assignProxiesToAccounts(accounts, schedule.user),
+  await Promise.all([
+
     processCommentsForAccounts(accounts, targetVideos, schedule)
- 
+  ]);
 }
+
+ 
+
 
 
 /**
@@ -871,7 +875,8 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
       continue;
     }
 
-    const cooldownKey = `account:${account._id}:video:${videoId}:cooldown`;
+    const cooldownKey = `schedule:${schedule._id}:account:${account._id}:video:${videoId}:cooldown`;
+;
     const isInCooldown = await redisClient.get(cooldownKey);
     if (isInCooldown) {
       console.log(`[Schedule ${schedule._id}] Skipping account ${account._id} for video ${videoId} (cooldown)`);
@@ -929,7 +934,8 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
       }
 
       const jobId = `post-comment-${createdComment._id.toString()}`;
-      const videoCooldownKey = `video:${videoId}:cooldown`;
+      const videoCooldownKey = `schedule:${schedule._id}:video:${videoId}:cooldown`;
+
 
       // Wait if the video is still on cooldown
       let isOnVideoCooldown = await redisClient.get(videoCooldownKey);
@@ -947,7 +953,8 @@ async function processCommentsForAccounts(accounts, targetVideos, schedule) {
         console.log(`[Schedule ${schedule._id}] Waiting ${COMMENT_DELAY_SPACING_MS}ms before queuing next comment`);
         await new Promise(r => setTimeout(r, COMMENT_DELAY_SPACING_MS));
       }
-
+      console.log("COMMENT_DELAY_SPACING_MSssssssssssssssssss",COMMENT_DELAY_SPACING_MS);
+      
       // Queue the comment without any internal delay
       await commentQueue.add('post-comment', {
         commentId: createdComment._id,
