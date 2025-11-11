@@ -309,14 +309,22 @@ const updateSchedule = async (req, res, next) => {
         minDelay: delays.minDelay,
         maxDelay: delays.maxDelay,
         betweenAccounts: delays.betweenAccounts,
-        limitComments: {
-          value:
-            delays.limitComments === 0
+        limitComments: (() => {
+          const lc = delays.limitComments;
+
+          const value =
+            typeof lc === 'object' && lc !== null
+              ? lc.value
+              : lc === 0
               ? randomBetween(delays.minSleepComments ?? 1, delays.maxSleepComments ?? 1)
-              : delays.limitComments,
-          min: delays.minSleepComments,
-          max: delays.maxSleepComments,
-        },
+              : lc;
+
+          return {
+            value: value ?? 0,
+            min: lc?.min ?? delays.minSleepComments ?? 0,
+            max: lc?.max ?? delays.maxSleepComments ?? 0,
+          };
+        })(),
       };
     }
 
@@ -346,24 +354,22 @@ const updateSchedule = async (req, res, next) => {
           return res.status(400).json({ message: rotationValidation.error });
         }
 
-        // Validate all account IDs exist and are active
-        const allAccountIds = [
-          ...(accountCategories.principal || []),
-          ...(accountCategories.secondary || [])
-        ];
-        
-        const validAccounts = await YouTubeAccountModel.find({
-          _id: { $in: allAccountIds },
-          user: req.user.id,
-          status: 'active'
-        });
-
-        if (validAccounts.length !== allAccountIds.length) {
-          return res.status(400).json({
-            message: 'Some accounts in categories are invalid or inactive',
-            validAccounts: validAccounts.map(a => a._id),
-          });
-        }
+        // Optional: validate accounts exist and are active
+        // const allAccountIds = [
+        //   ...(accountCategories.principal || []),
+        //   ...(accountCategories.secondary || [])
+        // ];
+        // const validAccounts = await YouTubeAccountModel.find({
+        //   _id: { $in: allAccountIds },
+        //   user: req.user.id,
+        //   status: 'active'
+        // });
+        // if (validAccounts.length !== allAccountIds.length) {
+        //   return res.status(400).json({
+        //     message: 'Some accounts in categories are invalid or inactive',
+        //     validAccounts: validAccounts.map(a => a._id),
+        //   });
+        // }
 
         // Update rotation config
         schedule.accountCategories = accountCategories;
@@ -374,11 +380,14 @@ const updateSchedule = async (req, res, next) => {
           rotatedSecondaryIds: schedule.accountRotation?.rotatedSecondaryIds || [],
           lastRotatedAt: schedule.accountRotation?.lastRotatedAt
         };
-        
-        // Use principal accounts as selected if rotation is newly enabled
-        if (!schedule.accountRotation?.enabled) {
-          schedule.selectedAccounts = accountCategories.principal;
-        }
+
+        // Always sync selectedAccounts with current rotation category
+        const currentRotationType = schedule.accountRotation?.currentlyActive || 'principal';
+        schedule.selectedAccounts =
+          currentRotationType === 'secondary'
+            ? accountCategories.secondary
+            : accountCategories.principal;
+
       } else {
         // Disable rotation
         schedule.accountRotation = { enabled: false };
@@ -401,6 +410,7 @@ const updateSchedule = async (req, res, next) => {
             validAccounts: validAccounts.map(a => a._id),
           });
         }
+
         schedule.selectedAccounts = validAccounts.map(a => a._id);
       } else {
         const activeAccounts = await YouTubeAccountModel.find({
@@ -436,6 +446,7 @@ const updateSchedule = async (req, res, next) => {
 
     // Save and refresh jobs/cache
     const savedSchedule = await schedule.save();
+
     if (savedSchedule.status === 'active') {
       await setupScheduleJob(savedSchedule._id);
     }
@@ -451,11 +462,13 @@ const updateSchedule = async (req, res, next) => {
       message: 'Schedule updated successfully',
       schedule: freshSchedule
     });
+
   } catch (error) {
     console.error('❌ updateSchedule error:', error);
     next(error);
   }
 };
+
 
 
 /**
