@@ -29,7 +29,7 @@ services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile.dev
+      dockerfile: Dockerfile
     container_name: Youtube-backend
     restart: unless-stopped
     ports:
@@ -37,7 +37,7 @@ services:
     environment:
       DATABASE_URL: "postgresql://user:password@db:5432/youtube_commenter?schema=public"
     volumes:
-      - .:/app         
+      - .:/app
       - /app/node_modules
     depends_on:
       - redis
@@ -48,6 +48,7 @@ services:
 volumes:
   redis_data:
   postgres_data:
+
 
 networks:
   app-network:
