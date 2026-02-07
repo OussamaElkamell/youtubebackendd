@@ -652,7 +652,7 @@ commentWorker = new Worker('post-comment', async (job) => {
       });
 
       await prisma.schedule.update({
-        where: { id: parseInt(scheduleId) || scheduleId },
+        where: { id: String(scheduleId) },
         data: { failedComments: { increment: 1 } }
       });
 
