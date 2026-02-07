@@ -976,14 +976,6 @@ async function optimizedProcessSchedule(scheduleId) {
   // Minimum 10s as race safety, maximum 1 hour.
   const dynamicTTL = Math.min(3600, Math.max(10, Math.floor((baseIntervalMs / 1000) * 0.9)));
 
-  // 🔒 Batch Cooldown: Using dynamic TTL from config
-  const cooldownKey = `schedule:${scheduleId}:batch_cooldown`;
-  const isTooSoon = await redisClient.get(cooldownKey);
-  if (isTooSoon) {
-    console.log(`[Schedule ${scheduleId}] ⏸️ Cooling down (Wait: ${dynamicTTL}s). Skipping but ensuring next run.`);
-    await ensureNextRun(scheduleId, baseIntervalMs);
-    return { success: false, message: 'Cooldown active', coolingDown: true };
-  }
 
   // 🔒 Lock with dynamic TTL to prevent overlapping executions
   const lockAcquired = await redisClient.set(lockKey, lockValue, {
@@ -997,8 +989,6 @@ async function optimizedProcessSchedule(scheduleId) {
     return { success: false, message: 'Lock overlap' };
   }
 
-  // Set cooldown key to prevent rapid-fire triggers
-  await redisClient.set(cooldownKey, '1', { EX: dynamicTTL });
 
   console.log(`[Schedule ${scheduleId}] 🔓 Lock acquired for ${dynamicTTL}s, starting processing`);
   let schedule = null;
