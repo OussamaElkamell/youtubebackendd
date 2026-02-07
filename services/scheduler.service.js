@@ -915,6 +915,37 @@ commentQueueEvents.on('active', ({ jobId }) => {
 
 
 /**
+ * Ensure a next run is scheduled for an interval schedule if none exists
+ */
+async function ensureNextRun(scheduleId, intervalMs) {
+  try {
+    const jobs = await scheduleQueue.getJobs(['delayed', 'waiting', 'active']);
+    const jobIdPrefix = `interval-${scheduleId}-`;
+    const futureJobExists = jobs.some(j => j.id && j.id.startsWith(jobIdPrefix));
+
+    if (!futureJobExists) {
+      console.log(`[Schedule ${scheduleId}] 🛡️ No future job found. Scheduling next run in ${intervalMs / 1000}s`);
+      const nextRunAt = new Date(Date.now() + intervalMs);
+
+      await Promise.all([
+        scheduleQueue.add('schedule-processing', { scheduleId }, {
+          delay: intervalMs,
+          jobId: `${jobIdPrefix}${Date.now() + intervalMs}`,
+          removeOnComplete: true,
+          removeOnFail: true
+        }),
+        prisma.schedule.update({
+          where: { id: scheduleId },
+          data: { nextRunAt }
+        })
+      ]);
+    }
+  } catch (error) {
+    console.error(`[Schedule ${scheduleId}] Error in ensureNextRun:`, error);
+  }
+}
+
+/**
  * Optimized schedule processing
  */
 async function optimizedProcessSchedule(scheduleId) {
@@ -946,7 +977,8 @@ async function optimizedProcessSchedule(scheduleId) {
   const cooldownKey = `schedule:${scheduleId}:batch_cooldown`;
   const isTooSoon = await redisClient.get(cooldownKey);
   if (isTooSoon) {
-    console.log(`[Schedule ${scheduleId}] ⏸️ Cooling down (Wait: ${dynamicTTL}s). Skipping.`);
+    console.log(`[Schedule ${scheduleId}] ⏸️ Cooling down (Wait: ${dynamicTTL}s). Skipping but ensuring next run.`);
+    await ensureNextRun(scheduleId, baseIntervalMs);
     return { success: false, message: 'Cooldown active', coolingDown: true };
   }
 
@@ -958,6 +990,7 @@ async function optimizedProcessSchedule(scheduleId) {
 
   if (!lockAcquired) {
     console.log(`[Schedule ${scheduleId}] 🔒 Overlap detected, skipping.`);
+    // We don't ensureNextRun here because the process that holds the lock is responsible for it
     return { success: false, message: 'Lock overlap' };
   }
 
@@ -1704,9 +1737,22 @@ function scheduleQuotaReset() {
   cron.schedule('0 0 * * *', async () => {
     try {
       const [updatedYT, updatedAPI, updatedSchedules] = await Promise.all([
-        prisma.youTubeAccount.updateMany({ data: { status: 'active' } }),
-        prisma.apiProfile.updateMany({ data: { usedQuota: 0, status: 'not exceeded', exceededAt: null } }),
-        prisma.schedule.updateMany({ data: { status: 'active' } })
+        // Reactivate inactive YouTube accounts for a fresh start each day
+        prisma.youTubeAccount.updateMany({
+          where: { status: 'inactive' },
+          data: { status: 'active', proxyErrorCount: 0 }
+        }),
+        // Reset API quotas
+        prisma.apiProfile.updateMany({
+          data: { usedQuota: 0, status: 'not exceeded', exceededAt: null }
+        }),
+        // Reactivate schedules that were stuck in error or quota exceeded, but NOT completed or paused
+        prisma.schedule.updateMany({
+          where: { status: { in: ['error', 'requires_review', 'paused'] } }, // We keep manually paused as paused? Or only error/review?
+          // Let's stick to ONLY error and requires_review for auto-reset to respect user's manual "pause"
+          where: { status: { in: ['error', 'requires_review'] } },
+          data: { status: 'active', errorCount: 0 }
+        })
       ]);
 
       console.log(
@@ -1730,11 +1776,23 @@ function scheduleFrequentStatusReset() {
   cron.schedule('*/15 * * * * *', async () => {
     try {
       const [updatedYT, updatedSchedules] = await Promise.all([
-        prisma.youTubeAccount.updateMany({ data: { status: 'active' } }),
-        prisma.schedule.updateMany({ data: { status: 'active' } })
+        // Only reactivate if they were inactive (not manually disabled or something else)
+        // Note: YouTubeAccount doesn't have many status types, so inactive is the safe bet
+        prisma.youTubeAccount.updateMany({
+          where: { status: 'inactive' },
+          data: { status: 'active' }
+        }),
+        // CRITICAL: Only reactivate schedules that are in 'error' status.
+        // DO NOT touch 'completed', 'paused', or 'requires_review' manually.
+        prisma.schedule.updateMany({
+          where: { status: 'error' },
+          data: { status: 'active' }
+        })
       ]);
 
-      console.log(`[${new Date().toISOString()}] Frequent reset: ${updatedYT.count} YouTube accounts, ${updatedSchedules.count} schedules updated.`);
+      if (updatedYT.count > 0 || updatedSchedules.count > 0) {
+        console.log(`[${new Date().toISOString()}] Frequent reset: ${updatedYT.count} YouTube accounts, ${updatedSchedules.count} schedules updated.`);
+      }
     } catch (error) {
       console.error('Error during frequent status reset:', error);
     }
@@ -1744,13 +1802,18 @@ async function cleanupExpiredKeys(scheduleId) {
   try {
     if (!redisClient?.isOpen) await initRedis();
 
-    const pattern = `schedule:${scheduleId}:*`;
-    const keys = await redisClient.keys(pattern);
+    // Restricted pattern to only catch transient tracking/cooldown keys
+    // DO NOT catch the main 'schedule:id' config key which might not have a TTL
+    const pattern = `schedule:${scheduleId}:*:cooldown`;
+    const videoPattern = `schedule:${scheduleId}:video:*:lastAccount`;
+
+    const keys = [...(await redisClient.keys(pattern)), ...(await redisClient.keys(videoPattern))];
 
     let cleanedCount = 0;
     for (const key of keys) {
       const ttl = await redisClient.ttl(key);
-      if (ttl === -1) { // Key exists but has no expiration
+      if (ttl === -1) { // Key exists but has no expiration (safety check)
+        // Only delete if it's strictly a cooldown or tracking key
         await redisClient.del(key);
         cleanedCount++;
         console.log(`Cleaned up key without TTL: ${key}`);
