@@ -970,8 +970,11 @@ async function optimizedProcessSchedule(scheduleId) {
   const baseIntervalConfig = basicSchedule.interval || { value: 60, unit: 'minutes' };
   const baseIntervalMs = calculateIntervalMs(baseIntervalConfig);
 
-  // Dynamic TTL: 100% of interval (as requested), minimum 10s as race safety, maximum 1 hour
-  const dynamicTTL = Math.min(3600, Math.max(10, Math.floor(baseIntervalMs / 1000)));
+  // Dynamic TTL: 90% of interval to provide a safety buffer, ensuring the cooldown 
+  // expires shortly BEFORE the next job is scheduled to run. This prevents 
+  // race conditions where BullMQ triggers the next job slightly early.
+  // Minimum 10s as race safety, maximum 1 hour.
+  const dynamicTTL = Math.min(3600, Math.max(10, Math.floor((baseIntervalMs / 1000) * 0.9)));
 
   // 🔒 Batch Cooldown: Using dynamic TTL from config
   const cooldownKey = `schedule:${scheduleId}:batch_cooldown`;
