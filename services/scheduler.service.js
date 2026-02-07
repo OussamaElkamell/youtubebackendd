@@ -984,8 +984,9 @@ async function optimizedProcessSchedule(scheduleId) {
   });
 
   if (!lockAcquired) {
-    console.log(`[Schedule ${scheduleId}] 🔒 Overlap detected, skipping.`);
-    // We don't ensureNextRun here because the process that holds the lock is responsible for it
+    console.log(`[Schedule ${scheduleId}] 🔒 Overlap detected, skipping but ensuring next run.`);
+    // Ensure next run is scheduled to prevent chain breakage from ghost locks
+    await ensureNextRun(scheduleId, baseIntervalMs);
     return { success: false, message: 'Lock overlap' };
   }
 
@@ -1230,6 +1231,15 @@ async function optimizedProcessSchedule(scheduleId) {
           type: 'unknown',
           user: 'unknown'
         }), { EX: 3600 });
+
+        // Ensure next run if schedule is still active (interval type)
+        if (newStatus === 'active') {
+          const scheduleType = basicSchedule?.scheduleType;
+          if (scheduleType === 'interval') {
+            console.log(`[Schedule ${scheduleId}] Error occurred but schedule still active, ensuring next run.`);
+            await ensureNextRun(scheduleId, baseIntervalMs);
+          }
+        }
       }
     } catch (updateError) {
       console.error(`[Schedule ${scheduleId}] Error updating error status:`, updateError);
