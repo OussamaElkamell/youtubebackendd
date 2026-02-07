@@ -4,7 +4,7 @@ class CacheService {
   constructor(prefix = 'app') {
     this.keyPrefix = prefix;
     this.client = null;
-    
+
     // Log Redis configuration (external Redis only, no Docker)
     console.log('📡 Redis configuration for external cache:', {
       url: process.env.REDIS_URL?.replace(/\/\/.*@/, '//***:***@'), // Hide credentials
@@ -14,35 +14,35 @@ class CacheService {
   }
 
   async initClient() {
-  if (!this.client) {
-    try {
-      const redisURL = new URL(process.env.REDIS_URL);
+    if (!this.client) {
+      try {
+        const redisURL = new URL(process.env.REDIS_URL);
 
-      this.client = createClient({
-        url: process.env.REDIS_URL,
-        socket: {
-          tls: redisURL.protocol === 'rediss:', // enable TLS only if using rediss
-          connectTimeout: 10000,
-          reconnectStrategy: (retries) => Math.min(retries * 100, 5000)
-        }
-      });
+        this.client = createClient({
+          url: process.env.REDIS_URL,
+          socket: {
+            tls: redisURL.protocol === 'rediss:', // enable TLS only if using rediss
+            connectTimeout: 3000,
+            reconnectStrategy: (retries) => Math.min(retries * 100, 5000)
+          }
+        });
 
-      this.client.on('error', (err) =>
-        console.error('❌ Cache Redis Client Error:', err)
-      );
+        this.client.on('error', (err) =>
+          console.error('❌ Cache Redis Client Error:', err)
+        );
 
-      this.client.on('connect', () =>
-        console.log('✅ Connected to external Redis cache successfully')
-      );
+        this.client.on('connect', () =>
+          console.log('✅ Connected to external Redis cache successfully')
+        );
 
-      await this.client.connect();
-    } catch (err) {
-      console.error('❌ Failed to initialize Redis cache client:', err);
+        await this.client.connect();
+      } catch (err) {
+        console.error('❌ Failed to initialize Redis cache client:', err);
+      }
     }
-  }
 
-  return this.client;
-}
+    return this.client;
+  }
 
   getKey(key) {
     return `${this.keyPrefix}:${key}`;
@@ -95,12 +95,12 @@ class CacheService {
   async clear(pattern) {
     try {
       const client = await this.initClient();
-      const searchPattern = pattern 
-        ? `${this.keyPrefix}:${pattern}` 
+      const searchPattern = pattern
+        ? `${this.keyPrefix}:${pattern}`
         : `${this.keyPrefix}:*`;
-      
+
       const keys = await client.keys(searchPattern);
-      
+
       for (const key of keys) {
         await client.del(key);
       }

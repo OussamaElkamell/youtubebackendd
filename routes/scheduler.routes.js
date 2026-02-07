@@ -7,10 +7,15 @@ const {
   updateSchedule,
   deleteSchedule: deleteScheduleHandler,
   pauseSchedule: pauseScheduleHandler,
-  resumeSchedule: resumeScheduleHandler
+  resumeSchedule: resumeScheduleHandler,
+  completeSchedule: completeScheduleHandler,
+  retryFailedComments: retryFailedCommentsHandler
 } = require('../controllers/scheduler.controller');
 
 const router = express.Router();
+
+router.post('/:id/complete', authenticateJWT, completeScheduleHandler);
+router.post('/:id/retry-failed', authenticateJWT, retryFailedCommentsHandler);
 
 /**
  * @route GET /api/scheduler

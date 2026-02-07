@@ -11,6 +11,21 @@ services:
     networks:
       - app-network
 
+  db:
+    image: postgres:15-alpine
+    container_name: app-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: youtube_commenter
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+
   app:
     build:
       context: .
@@ -19,16 +34,20 @@ services:
     restart: unless-stopped
     ports:
       - "8005:8005"
+    environment:
+      DATABASE_URL: "postgresql://user:password@db:5432/youtube_commenter?schema=public"
     volumes:
       - .:/app          # 🧠 This enables live reloading from your host
       - /app/node_modules
     depends_on:
       - redis
+      - db
     networks:
       - app-network
 
 volumes:
   redis_data:
+  postgres_data:
 
 networks:
   app-network:

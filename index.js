@@ -3,7 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const mongoose = require('mongoose');
+const prisma = require('./services/prisma.service');
 const rateLimit = require('express-rate-limit');
 const passport = require('passport');
 
@@ -13,6 +13,7 @@ const accountsRoutes = require('./routes/accounts.routes');
 const proxiesRoutes = require('./routes/proxies.routes');
 const commentsRoutes = require('./routes/comments.routes');
 const schedulerRoutes = require('./routes/scheduler.routes');
+const viewsRoutes = require('./routes/views.route.js');
 const apiProfilesRoutes = require('./routes/apiProfiles.routes');
 require('./cron/resetQuota');
 // Import services
@@ -23,16 +24,13 @@ const { setupPassport } = require('./config/passport.config');
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-// Connect to MongoDB
-mongoose.connect(process.env.MONGO_URL, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log('Connected to MongoDB'))
-.catch(err => {
-  console.error('MongoDB connection error:', err);
-  process.exit(1);
-});
+// Initializing Prisma...
+prisma.$connect()
+  .then(() => console.log('Connected to PostgreSQL via Prisma'))
+  .catch(err => {
+    console.error('Prisma connection error:', err);
+    process.exit(1);
+  });
 // Configure middleware
 app.use(helmet());
 app.use(cors({
@@ -60,11 +58,13 @@ setupPassport();
 app.use(passport.initialize());
 
 // Register routes
+console.log('Mounting schedulerRoutes:', schedulerRoutes.stack?.map(l => l.route?.path).filter(Boolean));
 app.use('/api/auth', authRoutes);
 app.use('/api/accounts', accountsRoutes);
 app.use('/api/proxies', proxiesRoutes);
 app.use('/api/comments', commentsRoutes);
 app.use('/api/scheduler', schedulerRoutes);
+app.use('/api/views', viewsRoutes);
 app.use('/api/profiles', apiProfilesRoutes);
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -85,7 +85,7 @@ app.use((err, req, res, next) => {
 // Start the server
 const server = app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  
+
   // Initialize the comment scheduler
   setupScheduler();
   scheduleQuotaReset();

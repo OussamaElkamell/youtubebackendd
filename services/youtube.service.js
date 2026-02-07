@@ -1,20 +1,14 @@
-
 const { google } = require('googleapis');
 const { OAuth2Client } = require('google-auth-library');
-const { YouTubeAccountModel } = require('../models/youtube-account.model');
-const { CommentModel } = require('../models/comment.model');
-
+const prisma = require('./prisma.service');
 const { createProxyAgent } = require('./proxy.service');
 const axios = require('axios');
 
-
-const ApiProfile = require('../models/ApiProfile');
-const { ScheduleModel } = require('../models/schedule.model');
-
-
 async function getActiveProfile() {
   try {
-    const profile = await ApiProfile.findOne({ isActive: true });
+    const profile = await prisma.apiProfile.findFirst({
+      where: { isActive: true }
+    });
     if (!profile) {
       throw new Error('No active profile found');
     }
@@ -24,38 +18,35 @@ async function getActiveProfile() {
   }
 }
 
-
 /**
  * Refresh an OAuth2 token if needed
  * @param {Object} account YouTube account from the database
- * @param {Boolean} force Force token refresh even if not expired
  */
-
-
-
 async function refreshTokenIfNeeded(account) {
-  const tryWithGoogleCredentials = async (googleCredentials) => {
+  const tryWithGoogleCredentials = async (account) => {
     const oauth2Client = new OAuth2Client(
-      googleCredentials.clientId,
-      googleCredentials.clientSecret,
-      googleCredentials.redirectUri
+      account.clientId,
+      account.clientSecret,
+      account.redirectUri
     );
 
     oauth2Client.setCredentials({
-      refresh_token: googleCredentials.refreshToken
+      refresh_token: account.refreshToken
     });
 
     try {
       const { credentials } = await oauth2Client.refreshAccessToken();
       if (!credentials.access_token) {
-        account.status = 'inactive';
-        await account.save();
+        await prisma.youTubeAccount.update({
+          where: { id: account.id },
+          data: { status: 'inactive' }
+        });
         throw new Error('Failed to obtain access token');
       }
 
       // Ensure we have a valid expiry time
-      const expiresInMillis = (credentials.expiry_date || 
-                              (credentials.expires_in ? (credentials.expires_in * 1000) : 3600 * 1000));
+      const expiresInMillis = (credentials.expiry_date ||
+        (credentials.expires_in ? (credentials.expires_in * 1000) : 3600 * 1000));
       const tokenExpiry = new Date(Date.now() + expiresInMillis);
 
       if (isNaN(tokenExpiry.getTime())) {
@@ -63,44 +54,51 @@ async function refreshTokenIfNeeded(account) {
       }
 
       // Update account with new access token and expiry time
-      account.google.accessToken = credentials.access_token;
-      account.google.tokenExpiry = tokenExpiry;
-      await account.save();
+      await prisma.youTubeAccount.update({
+        where: { id: account.id },
+        data: {
+          accessToken: credentials.access_token,
+          tokenExpiry: tokenExpiry,
+          status: 'active'
+        }
+      });
 
       return oauth2Client;
     } catch (error) {
-      account.status = 'inactive';
-      await account.save();
-      console.error(`Token refresh failed for account ${account._id}:`, error);
+      await prisma.youTubeAccount.update({
+        where: { id: account.id },
+        data: { status: 'inactive' }
+      });
+      console.error(`Token refresh failed for account ${account.id}:`, error);
       throw error;
     }
   };
 
   try {
-    if (!account.google?.refreshToken) {
-      account.status = 'inactive';
-      await account.save();
+    if (!account.refreshToken) {
+      await prisma.youTubeAccount.update({
+        where: { id: account.id },
+        data: { status: 'inactive' }
+      });
       throw new Error('No refresh token available. User needs to re-authenticate.');
     }
 
-    return await tryWithGoogleCredentials(account.google);
+    return await tryWithGoogleCredentials(account);
   } catch (error) {
-    account.status = 'inactive';
-    await account.save();
     console.error('Token refresh failed:', error);
     throw new Error(error.message || 'Failed to refresh token');
   }
 }
 
-
 function addRandomEmojis(text) {
   const emojis = ['🎉', '🔥', '🚀', '💯', '✨', '😎', '👍', '🤩', '🥳'];
-  const randomEmojis = Array.from({ length: 3 }, () => 
+  const randomEmojis = Array.from({ length: 3 }, () =>
     emojis[Math.floor(Math.random() * emojis.length)]
   ).join('');
 
   return `${text} ${randomEmojis}`;
 }
+
 function randomizeSiParamInYoutubeUrl(content) {
   const regex = /https:\/\/youtu\.be\/[^\s?]+\?si=([a-zA-Z0-9_-]+)/g;
   return content.replace(regex, (match, oldSi) => {
@@ -119,25 +117,73 @@ function generateRandomString(length) {
 }
 
 /**
+ * Like a video using the YouTube Data API
+ * @param {string} videoId - The YouTube video ID
+ * @param {string} accountId - The YouTube account ID to use for liking
+ * @param {Object} proxyOverride - Optional proxy to use for this request
+ */
+async function likeVideo(videoId, accountId, proxyOverride = null) {
+  try {
+    const account = await prisma.youTubeAccount.findUnique({
+      where: { id: accountId }
+    });
+
+    if (!account || account.status !== 'active') {
+      throw new Error(`Account ${accountId} is not active or not found`);
+    }
+
+    const youtube = await getYouTubeClient(account, proxyOverride);
+
+    console.log(`[YouTubeService] Attempting to like video ${videoId} with account ${account.email}`);
+
+    await youtube.videos.rate({
+      id: videoId,
+      rating: 'like'
+    });
+
+    // Verification check
+    try {
+      const ratingResponse = await youtube.videos.getRating({
+        id: videoId
+      });
+      const rating = ratingResponse.data.items?.[0]?.rating;
+      console.log(`[YouTubeService] Verified rating for ${videoId}: ${rating}`);
+    } catch (verifyError) {
+      console.warn(`[YouTubeService] Could not verify rating: ${verifyError.message}`);
+    }
+
+    await updateDailyUsage(accountId, 'likeCount');
+    console.log(`[YouTubeService] Successfully liked video ${videoId} with account ${account.email}`);
+
+    return { success: true };
+  } catch (error) {
+    console.error(`[YouTubeService] Failed to like video ${videoId}:`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
  * Post a comment to YouTube
- * @param {String} commentId MongoDB ID of the comment
+ * @param {String} commentId ID of the comment
  */
 async function postComment(commentId) {
   try {
-    // Get the comment with populated YouTube account and proxy
-    const comment = await CommentModel.findById(commentId)
-      .populate({
-        path: "youtubeAccount",
-        populate: { path: "proxy" },
-      })
-      .exec();
+    // Get the comment with included YouTube account and proxy
+    const comment = await prisma.comment.findUnique({
+      where: { id: commentId },
+      include: {
+        youtubeAccount: {
+          include: { proxy: true }
+        }
+      }
+    });
 
     if (!comment) throw new Error("Comment not found");
 
     const account = comment.youtubeAccount;
     if (!account || account.status === null) {
       console.warn("Account status is null, deleting comment...");
-      await comment.deleteOne();
+      await prisma.comment.delete({ where: { id: commentId } });
       return {
         success: false,
         message: "Comment deleted due to invalid account or status",
@@ -149,7 +195,9 @@ async function postComment(commentId) {
       throw new Error(`YouTube account is ${account.status}`);
     }
 
-    const schedule = await ScheduleModel.findById(comment.scheduleId).exec();
+    const schedule = await prisma.schedule.findUnique({
+      where: { id: comment.scheduleId }
+    });
     const includeEmojis = schedule?.includeEmojis === true;
 
     const proxy = account.proxy;
@@ -159,6 +207,11 @@ async function postComment(commentId) {
 
     // Use proxy agent
     const agent = await createProxyAgent(proxy);
+
+    if (!agent) {
+      throw new Error(`Failed to create proxy agent for ${proxy.host}:${proxy.port}`);
+    }
+
     const oauth2Client = await refreshTokenIfNeeded(account);
     const youtube = google.youtube({ version: "v3", auth: oauth2Client });
 
@@ -208,14 +261,15 @@ async function postComment(commentId) {
     const youtubeCommentId = response.data.id;
 
     // Update usage and schedule
-    await updateDailyUsage(account._id, "commentCount");
-    await ScheduleModel.findByIdAndUpdate(comment.scheduleId, {
-      lastUsedAccount: account._id,
+    await updateDailyUsage(account.id, "commentCount");
+    await prisma.schedule.update({
+      where: { id: comment.scheduleId },
+      data: { lastUsedAccountId: account.id }
     });
 
     return {
       success: true,
-      commentId: youtubeCommentId,
+      youtubeCommentId,
       message: "Comment posted successfully",
       error: null,
     };
@@ -228,10 +282,15 @@ async function postComment(commentId) {
       error.message.includes("dailyLimitExceeded")
     ) {
       try {
-        const comment = await CommentModel.findById(commentId).populate("youtubeAccount");
+        const comment = await prisma.comment.findUnique({
+          where: { id: commentId },
+          include: { youtubeAccount: true }
+        });
         if (comment?.youtubeAccount) {
-          comment.youtubeAccount.status = "limited";
-          await comment.youtubeAccount.save();
+          await prisma.youTubeAccount.update({
+            where: { id: comment.youtubeAccount.id },
+            data: { status: 'limited' }
+          });
           console.log("Account status updated to 'limited'.");
         }
       } catch (updateError) {
@@ -246,14 +305,17 @@ async function postComment(commentId) {
     };
   }
 }
+
 async function postCommentToConsole(commentId) {
   try {
-    const comment = await CommentModel.findById(commentId)
-      .populate({
-        path: "youtubeAccount",
-        populate: { path: "proxy" },
-      })
-      .exec();
+    const comment = await prisma.comment.findUnique({
+      where: { id: commentId },
+      include: {
+        youtubeAccount: {
+          include: { proxy: true }
+        }
+      }
+    });
 
     if (!comment) throw new Error("Comment not found");
 
@@ -262,7 +324,7 @@ async function postCommentToConsole(commentId) {
 
     if (!account || account.status === null) {
       console.warn("Invalid account, deleting comment...");
-      await comment.deleteOne();
+      await prisma.comment.delete({ where: { id: commentId } });
       return {
         success: false,
         message: "Comment deleted due to invalid account",
@@ -274,7 +336,9 @@ async function postCommentToConsole(commentId) {
       throw new Error(`YouTube account is ${account.status}`);
     }
 
-    const schedule = await ScheduleModel.findById(comment.scheduleId).exec();
+    const schedule = await prisma.schedule.findUnique({
+      where: { id: comment.scheduleId }
+    });
     const includeEmojis = schedule?.includeEmojis === true;
 
     let content = comment.content?.trim();
@@ -287,15 +351,16 @@ async function postCommentToConsole(commentId) {
 
     // Simulate posting the comment
     console.log("📢 Simulated Comment Post:");
-    console.log(`👤 Account: ${account.username || account._id}`);
+    console.log(`👤 Account: ${account.channelTitle || account.id}`);
     console.log(`🎯 Video ID: ${comment.videoId}`);
     console.log(`💬 Content: ${content}`);
     if (comment.parentId) console.log(`↪️ Replying to: ${comment.parentId}`);
-    if (proxy) console.log(`🌐 Proxy: ${proxy.ip}:${proxy.port}`);
+    if (proxy) console.log(`🌐 Proxy: ${proxy.host}:${proxy.port}`);
 
     // Simulate updating usage
-    await ScheduleModel.findByIdAndUpdate(comment.scheduleId, {
-      lastUsedAccount: account._id,
+    await prisma.schedule.update({
+      where: { id: comment.scheduleId },
+      data: { lastUsedAccountId: account.id }
     });
 
     return {
@@ -320,35 +385,38 @@ async function postCommentToConsole(commentId) {
  */
 async function updateDailyUsage(accountId, type) {
   try {
-    const account = await YouTubeAccountModel.findById(accountId);
-    
+    const account = await prisma.youTubeAccount.findUnique({
+      where: { id: accountId }
+    });
+
     if (!account) {
       return false;
     }
-    
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    
+
+    const updateData = { lastUsed: new Date() };
+
     // Reset counter if it's a new day
-    if (!account.dailyUsage.date || new Date(account.dailyUsage.date).getTime() !== today.getTime()) {
-      account.dailyUsage = {
-        date: today,
-        commentCount: 0,
-        likeCount: 0
-      };
+    if (!account.dailyUsageDate || new Date(account.dailyUsageDate).setHours(0, 0, 0, 0) !== today.getTime()) {
+      updateData.dailyUsageDate = today;
+      updateData.commentCount = type === 'commentCount' ? 1 : 0;
+      updateData.likeCount = type === 'likeCount' ? 1 : 0;
+    } else {
+      // Increment the specified counter
+      if (type === 'commentCount') {
+        updateData.commentCount = { increment: 1 };
+      } else if (type === 'likeCount') {
+        updateData.likeCount = { increment: 1 };
+      }
     }
-    
-    // Increment the specified counter
-    if (type === 'commentCount') {
-      account.dailyUsage.commentCount += 1;
-    } else if (type === 'likeCount') {
-      account.dailyUsage.likeCount += 1;
-    }
-    
-    // Update lastUsed timestamp
-    account.lastUsed = new Date();
-    
-    await account.save();
+
+    await prisma.youTubeAccount.update({
+      where: { id: accountId },
+      data: updateData
+    });
+
     return true;
   } catch (error) {
     console.error('Error updating daily usage:', error);
@@ -359,37 +427,25 @@ async function updateDailyUsage(accountId, type) {
 /**
  * Get a YouTube API client for a specific account
  * @param {Object} account YouTube account from database
+ * @param {Object} proxyOverride Optional proxy to override account proxy
  */
-async function getYouTubeClient(account) {
-  // Set up OAuth2 client
-  const activeProfile = await getActiveProfile();
-  const oauth2Client = new OAuth2Client(
-    activeProfile.clientId,
-    activeProfile.clientSecret,
-    activeProfile.redirectUri
-  );
-  
-  // Set credentials
-  oauth2Client.setCredentials({
-    access_token: account.google.accessToken,
-    refresh_token: account.google.refreshToken
+async function getYouTubeClient(account, proxyOverride = null) {
+  // Use refreshTokenIfNeeded to get a fresh client
+  const oauth2Client = await refreshTokenIfNeeded(account);
+
+  // Create YouTube client with auth
+  const youtube = google.youtube({
+    version: 'v3',
+    auth: oauth2Client
   });
-  
-  // Create YouTube client
-  const youtube = google.youtube('v3');
-  
-  // Set up proxy agent if account has a proxy
-  if (account.proxy) {
-    const proxyAgent = await createProxyAgent(account.proxy);
+
+  // Set up proxy agent if needed
+  const proxyToUse = proxyOverride || account.proxy;
+
+  if (proxyToUse) {
+    const proxyAgent = await createProxyAgent(proxyToUse);
     if (proxyAgent) {
-      oauth2Client.getRequestHeaders = function(url) {
-        return {
-          'User-Agent': getRandomUserAgent(),
-          ...this.credentials
-        };
-      };
-      
-      // Inject proxy agent into Axios instance
+      // Inject proxy agent into Google API context
       youtube.context._options = {
         ...youtube.context._options,
         httpAgent: proxyAgent,
@@ -397,7 +453,7 @@ async function getYouTubeClient(account) {
       };
     }
   }
-  
+
   return youtube;
 }
 
@@ -412,15 +468,16 @@ function getRandomUserAgent() {
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36',
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
   ];
-  
+
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 }
 
 module.exports = {
   refreshTokenIfNeeded,
   postComment,
+  likeVideo,
   updateDailyUsage,
-   postCommentToConsole,
+  postCommentToConsole,
   getYouTubeClient,
   getRandomUserAgent
 };

@@ -1,10 +1,63 @@
-const { ScheduleModel } = require('../models/schedule.model');
-const { CommentModel } = require('../models/comment.model');
-const { YouTubeAccountModel } = require('../models/youtube-account.model');
+const prisma = require('../services/prisma.service');
 const { setupScheduleJob, pauseSchedule, deleteSchedule, updateScheduleCache } = require('../services/scheduler.service');
 const { cacheService } = require('../services/cacheService');
 const { validateRotationConfig } = require('../services/account.rotation');
-const mongoose = require('mongoose');
+
+/**
+ * Format schedule response to match frontend expectations
+ */
+/**
+ * Format schedule response to match frontend expectations
+ */
+const formatScheduleResponse = (schedule, videoStats = {}) => {
+  const formatted = { ...schedule };
+
+  // Map rotation fields
+  formatted.accountRotation = {
+    enabled: schedule.rotationEnabled || false,
+    currentlyActive: schedule.currentlyActive || 'principal',
+    lastRotatedAt: schedule.lastRotatedAt
+  };
+  formatted.nextRunAt = schedule.nextRunAt;
+
+  formatted.accountCategories = {
+    principal: schedule.principalAccounts || [],
+    secondary: schedule.secondaryAccounts || []
+  };
+
+  // Map nested objects if they are returned as flat fields in Prisma
+  formatted.delays = {
+    minDelay: schedule.minDelay,
+    maxDelay: schedule.maxDelay,
+    betweenAccounts: schedule.betweenAccounts,
+    limitComments: schedule.limitComments
+  };
+
+  formatted.schedule = {
+    type: schedule.scheduleType,
+    startDate: schedule.startDate,
+    endDate: schedule.endDate,
+    cronExpression: schedule.cronExpression,
+    interval: schedule.interval,
+    days: schedule.scheduleConfig?.days,
+    startTime: schedule.scheduleConfig?.startTime,
+    endTime: schedule.scheduleConfig?.endTime
+  };
+
+  // Attach video progress stats
+  // videoStats is assumed to be { [scheduleId]: { [videoId]: count } } or just { [videoId]: count } if handling single schedule
+  if (videoStats[schedule.id]) {
+    formatted.videoProgress = videoStats[schedule.id];
+  } else if (Object.keys(videoStats).length > 0 && !videoStats[schedule.id]) {
+    // Fallback if videoStats is just the map for this single schedule
+    formatted.videoProgress = videoStats;
+  } else {
+    formatted.videoProgress = {};
+  }
+
+
+  return formatted;
+};
 
 /**
  * Get all schedules for the authenticated user
@@ -13,41 +66,77 @@ const getSchedules = async (req, res, next) => {
   try {
     const { status, page = 1, limit = 20 } = req.query;
     const cacheKey = `schedules:${req.user.id}:${status || 'all'}:${page}:${limit}`;
-    
+
     // Try to get from cache first
     const cachedData = await cacheService.getUserData(req.user.id, cacheKey);
     if (cachedData) {
       return res.json(cachedData);
     }
-    
-    const query = { user: req.user.id };
-    
+
+    const where = { userId: req.user.id };
+
     // Filter by status if provided
     if (status) {
-      query.status = status;
+      where.status = status;
     }
-    
-    const schedules = await ScheduleModel.find(query)
-      .populate('selectedAccounts', 'email channelTitle status')
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(parseInt(limit));
-      
-    const total = await ScheduleModel.countDocuments(query);
-    
+
+    const schedules = await prisma.schedule.findMany({
+      where,
+      include: {
+        selectedAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        },
+        principalAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        },
+        secondaryAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        }
+      },
+      orderBy: { createdAt: 'desc' },
+      skip: (parseInt(page) - 1) * parseInt(limit),
+      take: parseInt(limit)
+    });
+
+    // 📊 Aggregate comments per video for these schedules
+    const scheduleIds = schedules.map(s => s.id);
+    const videoStatsRaw = await prisma.comment.groupBy({
+      by: ['scheduleId', 'videoId'],
+      where: {
+        scheduleId: { in: scheduleIds },
+        status: 'posted' // Only count successfully posted comments? Or all? Usually 'posted'.
+      },
+      _count: {
+        _all: true
+      }
+    });
+
+    // Transform into { [scheduleId]: { [videoId]: count } }
+    const videoStats = {};
+    videoStatsRaw.forEach(stat => {
+      if (!videoStats[stat.scheduleId]) {
+        videoStats[stat.scheduleId] = {};
+      }
+      videoStats[stat.scheduleId][stat.videoId] = stat._count._all;
+    });
+
+    const formattedSchedules = schedules.map(s => formatScheduleResponse(s, videoStats));
+
+    const total = await prisma.schedule.count({ where });
+
     const responseData = {
-      schedules,
+      schedules: formattedSchedules,
       pagination: {
         total,
         page: parseInt(page),
         limit: parseInt(limit),
-        pages: Math.ceil(total / limit)
+        pages: Math.ceil(total / parseInt(limit))
       }
     };
-    
+
     // Cache for 5 minutes
-    await cacheService.setUserData(req.user.id, cacheKey, responseData, 5);
-    
+    await cacheService.setUserData(req.user.id, cacheKey, responseData, 10);
+
     res.json(responseData);
   } catch (error) {
     next(error);
@@ -60,38 +149,78 @@ const getSchedules = async (req, res, next) => {
 const getScheduleById = async (req, res, next) => {
   try {
     const cacheKey = `schedule:${req.params.id}`;
-    
+
     // Try to get from cache first
     const cachedData = await cacheService.getUserData(req.user.id, cacheKey);
     if (cachedData) {
       return res.json(cachedData);
     }
-    
-    const schedule = await ScheduleModel.findOne({
-      _id: req.params.id,
-      user: req.user.id
-    }).populate('selectedAccounts', 'email channelTitle status');
-    
+
+    const schedule = await prisma.schedule.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user.id
+      },
+      include: {
+        selectedAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        },
+        principalAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        },
+        secondaryAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        }
+      }
+    });
+
     if (!schedule) {
       return res.status(404).json({ message: 'Schedule not found' });
     }
-    
+
     // Get comments related to this schedule
-    const comments = await CommentModel.find({
-      user: req.user.id,
-      'metadata.scheduleId': schedule._id
-    }).sort({ createdAt: -1 }).limit(100);
-    
-    const responseData = { schedule, comments };
-    
+    const comments = await prisma.comment.findMany({
+      where: {
+        userId: req.user.id,
+        scheduleId: schedule.id
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100
+    });
+
+    // 📊 Aggregate comments per video for this schedule
+    const videoStatsRaw = await prisma.comment.groupBy({
+      by: ['videoId'],
+      where: {
+        scheduleId: schedule.id,
+        status: 'posted'
+      },
+      _count: {
+        _all: true
+      }
+    });
+
+    const videoStats = {};
+    videoStatsRaw.forEach(stat => {
+      videoStats[stat.videoId] = stat._count._all;
+    });
+
+    const formattedSchedule = formatScheduleResponse(schedule, { [schedule.id]: videoStats });
+
+    // Explicitly attach it if the helper felt weird about structure or just ensure it's there
+    formattedSchedule.videoProgress = videoStats;
+
+    const responseData = { schedule: formattedSchedule, comments };
+
     // Cache for 5 minutes
-    await cacheService.setUserData(req.user.id, cacheKey, responseData, 5);
-    
+    await cacheService.setUserData(req.user.id, cacheKey, responseData, 10);
+
     res.json(responseData);
   } catch (error) {
     next(error);
   }
 };
+
 
 /**
  * Create a new schedule
@@ -110,36 +239,28 @@ const createSchedule = async (req, res, next) => {
       delays,
       useAI,
       accountCategories,
-      accountRotation
+      accountRotation: rotationInput
     } = req.body;
-    console.log("scheduleConfig", scheduleConfig);
 
-    // helper to get a random integer between min and max (inclusive)
     const randomBetween = (min, max) =>
       Math.floor(Math.random() * (max - min + 1)) + min;
 
-    // --- ✅ FIXED: Reorganize delays ---
     let limitCommentsData;
-
-    if (
-      typeof delays.limitComments === "object" &&
-      delays.limitComments !== null
-    ) {
-      // Case 1: already structured as { value, min, max }
+    if (typeof delays.limitComments === "object" && delays.limitComments !== null) {
       limitCommentsData = {
         value: Number(delays.limitComments.value ?? 0),
         min: Number(delays.limitComments.min ?? 0),
         max: Number(delays.limitComments.max ?? 0),
+        isRandom: !!delays.limitComments.isRandom
       };
     } else {
-      // Case 2: simple number → build it properly
       limitCommentsData = {
-        value:
-          delays.limitComments === 0
-            ? randomBetween(delays.minSleepComments ?? 1, delays.maxSleepComments ?? 1)
-            : Number(delays.limitComments ?? 0),
+        value: delays.limitComments === 0
+          ? randomBetween(delays.minSleepComments ?? 1, delays.maxSleepComments ?? 1)
+          : Number(delays.limitComments ?? 0),
         min: Number(delays.minSleepComments ?? 0),
         max: Number(delays.maxSleepComments ?? 0),
+        isRandom: false
       };
     }
 
@@ -150,7 +271,6 @@ const createSchedule = async (req, res, next) => {
       limitComments: limitCommentsData,
     };
 
-    // --- Reorganize interval ---
     let intervalData;
     if (scheduleConfig?.interval) {
       const i = scheduleConfig.interval;
@@ -158,20 +278,18 @@ const createSchedule = async (req, res, next) => {
       const maxVal = i.maxValue ?? i.max ?? minVal;
 
       intervalData = {
-        value:
-          i.value === 0
-            ? randomBetween(minVal, maxVal)
-            : i.value ?? 1,
+        value: i.value === 0 ? randomBetween(minVal, maxVal) : i.value ?? 1,
         unit: i.unit ?? 'minutes',
         min: minVal,
         max: maxVal,
+        isRandom: !!i.isRandom
       };
     } else {
       intervalData = { value: 1, unit: 'minutes' };
     }
 
-    // --- Validate account rotation config ---
-    if (accountRotation?.enabled) {
+    let finalSelectedAccounts = [];
+    if (rotationInput?.enabled) {
       const rotationValidation = validateRotationConfig(accountCategories, true);
       if (!rotationValidation.isValid) {
         return res.status(400).json({ message: rotationValidation.error });
@@ -182,91 +300,112 @@ const createSchedule = async (req, res, next) => {
         ...(accountCategories.secondary || [])
       ];
 
-      const validAccounts = await YouTubeAccountModel.find({
-        _id: { $in: allAccountIds },
-        user: req.user.id,
-        status: 'active'
+      const validAccountsCount = await prisma.youTubeAccount.count({
+        where: {
+          id: { in: allAccountIds },
+          userId: req.user.id,
+          status: 'active'
+        }
       });
 
-      if (validAccounts.length !== allAccountIds.length) {
-        return res.status(400).json({
-          message: 'Some accounts in categories are invalid or inactive',
-          validAccounts: validAccounts.map(a => a._id),
-        });
+      if (validAccountsCount !== allAccountIds.length) {
+        return res.status(400).json({ message: 'Some accounts in categories are invalid or inactive' });
       }
 
-      selectedAccounts = accountCategories.principal;
+      finalSelectedAccounts = accountCategories.principal;
     } else {
-      // --- Validate accounts (non-rotation mode) ---
       if (selectedAccounts && selectedAccounts.length > 0) {
-        const validAccounts = await YouTubeAccountModel.find({
-          _id: { $in: selectedAccounts },
-          user: req.user.id,
-          status: 'active'
+        const validAccounts = await prisma.youTubeAccount.findMany({
+          where: {
+            id: { in: selectedAccounts },
+            userId: req.user.id,
+            status: 'active'
+          },
+          select: { id: true }
         });
 
         if (validAccounts.length !== selectedAccounts.length) {
-          return res.status(400).json({
-            message: 'Some selected accounts are invalid or inactive',
-            validAccounts: validAccounts.map(a => a._id),
-          });
+          return res.status(400).json({ message: 'Some selected accounts are invalid or inactive' });
         }
+        finalSelectedAccounts = validAccounts.map(a => a.id);
       } else {
-        const activeAccounts = await YouTubeAccountModel.find({
-          user: req.user.id,
-          status: 'active'
+        const activeAccounts = await prisma.youTubeAccount.findMany({
+          where: {
+            userId: req.user.id,
+            status: 'active'
+          },
+          select: { id: true }
         });
         if (activeAccounts.length === 0) {
           return res.status(400).json({ message: 'No active YouTube accounts available' });
         }
-        selectedAccounts = activeAccounts.map(a => a._id);
+        finalSelectedAccounts = activeAccounts.map(a => a.id);
       }
     }
 
-    // --- Create Schedule ---
-    const schedule = new ScheduleModel({
-      user: req.user.id,
+    const scheduleData = {
+      userId: req.user.id,
       name,
       commentTemplates,
       targetVideos: targetVideos || [],
       targetChannels: targetChannels || [],
       accountSelection: accountSelection || 'specific',
-      selectedAccounts,
-      schedule: {
-        ...scheduleConfig,
-        interval: intervalData
+      selectedAccounts: {
+        connect: finalSelectedAccounts.map(id => ({ id }))
       },
-      delays: delaysData,
+      startDate: scheduleConfig.startDate ? new Date(scheduleConfig.startDate) : null,
+      endDate: scheduleConfig.endDate ? new Date(scheduleConfig.endDate) : null,
+      scheduleType: scheduleConfig.type || 'immediate',
+      cronExpression: scheduleConfig.cronExpression,
+      scheduleConfig: {
+        days: scheduleConfig.days,
+        startTime: scheduleConfig.startTime,
+        endTime: scheduleConfig.endTime
+      },
+      interval: intervalData,
+      minDelay: delaysData.minDelay,
+      maxDelay: delaysData.maxDelay,
+      betweenAccounts: delaysData.betweenAccounts,
+      limitComments: delaysData.limitComments,
       includeEmojis,
       status: 'active',
-      interval: intervalData,
-      useAI,
-      accountCategories: accountRotation?.enabled ? accountCategories : undefined,
-      accountRotation: accountRotation?.enabled
-        ? {
-            enabled: true,
-            currentlyActive: 'principal',
-            rotatedPrincipalIds: [],
-            rotatedSecondaryIds: []
-          }
-        : undefined,
+      useAI: useAI || false,
+      principalAccounts: rotationInput?.enabled && accountCategories?.principal ? {
+        connect: accountCategories.principal.map(id => ({ id }))
+      } : undefined,
+      secondaryAccounts: rotationInput?.enabled && accountCategories?.secondary ? {
+        connect: accountCategories.secondary.map(id => ({ id }))
+      } : undefined,
+      rotationEnabled: rotationInput?.enabled ? true : false,
+      currentlyActive: rotationInput?.enabled ? 'principal' : 'principal'
+    };
+
+    const schedule = await prisma.schedule.create({
+      data: scheduleData,
+      include: {
+        selectedAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        },
+        principalAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        },
+        secondaryAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        }
+      }
     });
 
-    await schedule.save();
+    await updateScheduleCache(schedule.id);
 
-    // cache + job setup
-    await updateScheduleCache(schedule._id);
-    await cacheService.clear(`user:${req.user.id}:schedules:*`);
-    await setupScheduleJob(schedule._id);
-
-    res.status(201).json({ message: 'Schedule created successfully', schedule });
+    const formattedSchedule = formatScheduleResponse(schedule);
+    res.status(201).json({
+      message: 'Schedule created successfully',
+      schedule: formattedSchedule
+    });
   } catch (error) {
     next(error);
   }
 };
-
-
-
 
 /**
  * Update a schedule
@@ -286,23 +425,23 @@ const updateSchedule = async (req, res, next) => {
       delays,
       useAI,
       accountCategories,
-      accountRotation
+      accountRotation: rotationInput
     } = req.body;
 
-    const schedule = await ScheduleModel.findOne({
-      _id: req.params.id,
-      user: req.user.id
+    const schedule = await prisma.schedule.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user.id
+      }
     });
 
     if (!schedule) {
       return res.status(404).json({ message: 'Schedule not found' });
     }
 
-    // helper to get a random integer between min and max (inclusive)
     const randomBetween = (min, max) =>
       Math.floor(Math.random() * (max - min + 1)) + min;
 
-    // --- Reorganize delays (aligned with createSchedule) ---
     let delaysData;
     if (delays) {
       delaysData = {
@@ -311,156 +450,159 @@ const updateSchedule = async (req, res, next) => {
         betweenAccounts: delays.betweenAccounts,
         limitComments: (() => {
           const lc = delays.limitComments;
-
-          const value =
-            typeof lc === 'object' && lc !== null
-              ? lc.value
-              : lc === 0
+          const value = typeof lc === 'object' && lc !== null
+            ? lc.value
+            : lc === 0
               ? randomBetween(delays.minSleepComments ?? 1, delays.maxSleepComments ?? 1)
               : lc;
-
           return {
             value: value ?? 0,
             min: lc?.min ?? delays.minSleepComments ?? 0,
             max: lc?.max ?? delays.maxSleepComments ?? 0,
+            isRandom: !!lc?.isRandom
           };
         })(),
       };
     }
 
-    // --- Reorganize interval (aligned with createSchedule) ---
     let intervalData;
     if (scheduleConfig?.interval) {
       const i = scheduleConfig.interval;
       const minVal = i.minValue ?? i.min ?? 1;
       const maxVal = i.maxValue ?? i.max ?? minVal;
-
       intervalData = {
-        value:
-          i.value === 0
-            ? randomBetween(minVal, maxVal)
-            : i.value ?? 1,
+        value: i.value === 0 ? randomBetween(minVal, maxVal) : i.value ?? 1,
         unit: i.unit ?? 'minutes',
         min: minVal,
         max: maxVal,
+        isRandom: !!i.isRandom
       };
     }
 
-    // --- Validate account rotation config if being updated ---
-    if (accountRotation !== undefined) {
-      if (accountRotation?.enabled) {
+    const updateData = {};
+    if (name !== undefined) updateData.name = name;
+    if (status !== undefined) updateData.status = status;
+    if (commentTemplates !== undefined) updateData.commentTemplates = commentTemplates;
+    if (targetVideos !== undefined) updateData.targetVideos = targetVideos;
+    if (targetChannels !== undefined) updateData.targetChannels = targetChannels;
+    if (accountSelection !== undefined) updateData.accountSelection = accountSelection;
+    if (includeEmojis !== undefined) updateData.includeEmojis = includeEmojis;
+    if (useAI !== undefined) updateData.useAI = useAI;
+
+    // Flatten delays
+    if (delaysData) {
+      updateData.minDelay = delaysData.minDelay;
+      updateData.maxDelay = delaysData.maxDelay;
+      updateData.betweenAccounts = delaysData.betweenAccounts;
+      updateData.limitComments = delaysData.limitComments;
+    }
+
+    // Flatten scheduleConfig
+    if (scheduleConfig) {
+      if (scheduleConfig.type) updateData.scheduleType = scheduleConfig.type;
+      if (scheduleConfig.startDate !== undefined) updateData.startDate = scheduleConfig.startDate ? new Date(scheduleConfig.startDate) : null;
+      if (scheduleConfig.endDate !== undefined) updateData.endDate = scheduleConfig.endDate ? new Date(scheduleConfig.endDate) : null;
+      if (scheduleConfig.cronExpression !== undefined) updateData.cronExpression = scheduleConfig.cronExpression;
+      if (intervalData) updateData.interval = intervalData;
+
+      updateData.scheduleConfig = {
+        days: scheduleConfig.days || schedule.scheduleConfig?.days,
+        startTime: scheduleConfig.startTime || schedule.scheduleConfig?.startTime,
+        endTime: scheduleConfig.endTime || schedule.scheduleConfig?.endTime
+      };
+    }
+
+    if (rotationInput !== undefined) {
+      if (rotationInput?.enabled) {
         const rotationValidation = validateRotationConfig(accountCategories, true);
         if (!rotationValidation.isValid) {
           return res.status(400).json({ message: rotationValidation.error });
         }
 
-        // Optional: validate accounts exist and are active
-        // const allAccountIds = [
-        //   ...(accountCategories.principal || []),
-        //   ...(accountCategories.secondary || [])
-        // ];
-        // const validAccounts = await YouTubeAccountModel.find({
-        //   _id: { $in: allAccountIds },
-        //   user: req.user.id,
-        //   status: 'active'
-        // });
-        // if (validAccounts.length !== allAccountIds.length) {
-        //   return res.status(400).json({
-        //     message: 'Some accounts in categories are invalid or inactive',
-        //     validAccounts: validAccounts.map(a => a._id),
-        //   });
-        // }
+        updateData.rotationEnabled = true;
+        updateData.currentlyActive = schedule.currentlyActive || 'principal';
 
-        // Update rotation config
-        schedule.accountCategories = accountCategories;
-        schedule.accountRotation = {
-          enabled: true,
-          currentlyActive: schedule.accountRotation?.currentlyActive || 'principal',
-          rotatedPrincipalIds: schedule.accountRotation?.rotatedPrincipalIds || [],
-          rotatedSecondaryIds: schedule.accountRotation?.rotatedSecondaryIds || [],
-          lastRotatedAt: schedule.accountRotation?.lastRotatedAt
-        };
-
-        // Always sync selectedAccounts with current rotation category
-        const currentRotationType = schedule.accountRotation?.currentlyActive || 'principal';
-        schedule.selectedAccounts =
-          currentRotationType === 'secondary'
-            ? accountCategories.secondary
-            : accountCategories.principal;
-
-      } else {
-        // Disable rotation
-        schedule.accountRotation = { enabled: false };
-        schedule.accountCategories = undefined;
-      }
-    }
-
-    // --- Validate / update selected accounts (non-rotation mode or manual override) ---
-    if (selectedAccounts !== undefined && !accountRotation?.enabled) {
-      if (selectedAccounts.length > 0) {
-        const validAccounts = await YouTubeAccountModel.find({
-          _id: { $in: selectedAccounts },
-          user: req.user.id,
-          status: 'active'
-        });
-
-        if (validAccounts.length !== selectedAccounts.length) {
-          return res.status(400).json({
-            message: 'Some selected accounts are invalid or inactive',
-            validAccounts: validAccounts.map(a => a._id),
-          });
+        // Update relationships for account categories
+        if (accountCategories) {
+          if (accountCategories.principal) {
+            updateData.principalAccounts = {
+              set: accountCategories.principal.map(id => ({ id }))
+            };
+          }
+          if (accountCategories.secondary) {
+            updateData.secondaryAccounts = {
+              set: accountCategories.secondary.map(id => ({ id }))
+            };
+          }
         }
 
-        schedule.selectedAccounts = validAccounts.map(a => a._id);
+        const currentRotationType = updateData.currentlyActive;
+        const finalAccounts = currentRotationType === 'secondary' ? accountCategories.secondary : accountCategories.principal;
+
+        if (finalAccounts) {
+          updateData.selectedAccounts = {
+            set: finalAccounts.map(id => ({ id }))
+          };
+        }
       } else {
-        const activeAccounts = await YouTubeAccountModel.find({
-          user: req.user.id,
-          status: 'active'
+        updateData.rotationEnabled = false;
+        // Optionally disconnect accounts from rotation categories
+        updateData.principalAccounts = { set: [] };
+        updateData.secondaryAccounts = { set: [] };
+      }
+    } else if (selectedAccounts !== undefined && !schedule.rotationEnabled) {
+      if (selectedAccounts.length > 0) {
+        const validAccountsCount = await prisma.youTubeAccount.count({
+          where: {
+            id: { in: selectedAccounts },
+            userId: req.user.id,
+            status: 'active'
+          }
+        });
+        if (validAccountsCount !== selectedAccounts.length) {
+          return res.status(400).json({ message: 'Some selected accounts are invalid or inactive' });
+        }
+        updateData.selectedAccounts = {
+          set: selectedAccounts.map(id => ({ id }))
+        };
+      } else {
+        const activeAccounts = await prisma.youTubeAccount.findMany({
+          where: { userId: req.user.id, status: 'active' },
+          select: { id: true }
         });
         if (activeAccounts.length === 0) {
           return res.status(400).json({ message: 'No active YouTube accounts available' });
         }
-        schedule.selectedAccounts = activeAccounts.map(a => a._id);
+        updateData.selectedAccounts = {
+          set: activeAccounts.map(a => ({ id: a.id }))
+        };
       }
     }
 
-    // --- Apply primitive field updates ---
-    if (name !== undefined) schedule.name = name;
-    if (status !== undefined) schedule.status = status;
-    if (commentTemplates !== undefined) schedule.commentTemplates = commentTemplates;
-    if (targetVideos !== undefined) schedule.targetVideos = targetVideos;
-    if (targetChannels !== undefined) schedule.targetChannels = targetChannels;
-    if (accountSelection !== undefined) schedule.accountSelection = accountSelection;
-    if (includeEmojis !== undefined) schedule.includeEmojis = includeEmojis;
-    if (useAI !== undefined) schedule.useAI = useAI;
+    const savedSchedule = await prisma.schedule.update({
+      where: { id: req.params.id },
+      data: updateData,
+      include: {
+        selectedAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        },
+        principalAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        },
+        secondaryAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        }
+      }
+    });
 
-    // --- Apply delays & interval updates ---
-    if (delaysData) schedule.delays = delaysData;
-    if (scheduleConfig) {
-      schedule.schedule = {
-        ...scheduleConfig,
-        interval: intervalData ?? scheduleConfig.interval
-      };
-      if (intervalData) schedule.interval = intervalData;
-    }
+    // Use centralized cache invalidation and job management
+    await updateScheduleCache(savedSchedule.id);
 
-    // Save and refresh jobs/cache
-    const savedSchedule = await schedule.save();
-
-    if (savedSchedule.status === 'active') {
-      await setupScheduleJob(savedSchedule._id);
-    }
-
-    await cacheService.clear(`user:${req.user.id}:schedules:*`);
-    await cacheService.deleteUserData(req.user.id, `schedule:${savedSchedule._id}`);
-
-    const freshSchedule = await ScheduleModel.findById(savedSchedule._id)
-      .populate('selectedAccounts', 'email channelTitle status')
-      .lean();
+    const formattedSchedule = formatScheduleResponse(savedSchedule);
 
     return res.json({
       message: 'Schedule updated successfully',
-      schedule: freshSchedule
+      schedule: formattedSchedule
     });
 
   } catch (error) {
@@ -469,38 +611,33 @@ const updateSchedule = async (req, res, next) => {
   }
 };
 
-
-
 /**
  * Delete a schedule
  */
 const deleteScheduleHandler = async (req, res, next) => {
   try {
-    // Delete comments associated with the specified schedule
     const scheduleId = req.params.id;
 
-    // Delete comments that belong to the specific schedule
-    await CommentModel.deleteMany({
-      scheduleId: scheduleId, // Assuming comments have a `scheduleId` field
+    const schedule = await prisma.schedule.findFirst({
+      where: { id: scheduleId, userId: req.user.id }
     });
 
-    // Now delete the schedule
-    const result = await ScheduleModel.deleteOne({
-      _id: scheduleId,
-      user: req.user.id
-    });
-
-    if (result.deletedCount === 0) {
+    if (!schedule) {
       return res.status(404).json({ message: 'Schedule not found' });
     }
+
+    // Use transaction to ensure data integrity
+    await prisma.$transaction([
+      prisma.comment.deleteMany({ where: { scheduleId } }),
+      prisma.schedule.delete({ where: { id: scheduleId } })
+    ]);
 
     // Delete from Redis and stop active jobs
     await deleteSchedule(scheduleId);
 
     // Invalidate cache
-  await cacheService.clear(`user:${req.user.id}:schedules:*`);
-await cacheService.deleteUserData(req.user.id, `schedule:${scheduleId}`);
-
+    await cacheService.clear(`user:${req.user.id}:schedules:*`);
+    await cacheService.deleteUserData(req.user.id, `schedule:${scheduleId}`);
 
     res.json({ message: 'Schedule and related comments deleted successfully' });
   } catch (error) {
@@ -513,42 +650,27 @@ await cacheService.deleteUserData(req.user.id, `schedule:${scheduleId}`);
  */
 const pauseScheduleHandler = async (req, res, next) => {
   try {
-    const schedule = await ScheduleModel.findOne({
-      _id: req.params.id,
-      user: req.user.id
+    const schedule = await prisma.schedule.findFirst({
+      where: { id: req.params.id, userId: req.user.id }
     });
-    
+
     if (!schedule) {
       return res.status(404).json({ message: 'Schedule not found' });
     }
-    
-    schedule.status = 'paused';
-    const savedSchedule = await schedule.save();
-    console.log(`✅ Schedule ${req.params.id} paused and saved to external MongoDB:`, {
-      id: savedSchedule._id,
-      status: savedSchedule.status,
-      dbHost: mongoose.connection.host,
-      dbName: mongoose.connection.db.databaseName
+
+    const updatedSchedule = await prisma.schedule.update({
+      where: { id: req.params.id },
+      data: { status: 'paused', nextRunAt: null }
     });
-    
-    // Verify the save by reading back from external database
-    const verifySchedule = await ScheduleModel.findById(req.params.id);
-    console.log(`✅ Schedule verification - Status in external DB: ${verifySchedule?.status}`);
-    
-    // Update Redis cache with fresh data from database
 
-    // Pause active jobs
     await pauseSchedule(req.params.id);
-    
-    // Invalidate cache
- await updateScheduleCache(req.params.id);
-await cacheService.clear(`user:${req.user.id}:schedules:*`);
-await cacheService.deleteUserData(req.user.id, `schedule:${req.params.id}`);
+    await updateScheduleCache(req.params.id);
 
-    
+    const formattedSchedule = formatScheduleResponse(updatedSchedule);
+
     res.json({
       message: 'Schedule paused successfully',
-      schedule
+      schedule: formattedSchedule
     });
   } catch (error) {
     next(error);
@@ -560,96 +682,109 @@ await cacheService.deleteUserData(req.user.id, `schedule:${req.params.id}`);
  */
 const resumeScheduleHandler = async (req, res, next) => {
   try {
-    // 1. Find the schedule in MongoDB
-    const schedule = await ScheduleModel.findOne({
-      _id: req.params.id,
-      user: req.user.id
+    const schedule = await prisma.schedule.findFirst({
+      where: { id: req.params.id, userId: req.user.id }
     });
 
     if (!schedule) {
       return res.status(404).json({ message: 'Schedule not found' });
     }
 
-    // 2. Update status to active and save
-    schedule.status = 'active';
-    const savedSchedule = await schedule.save();
-
-    console.log(`✅ Schedule ${req.params.id} resumed and saved to MongoDB:`, {
-      id: savedSchedule._id,
-      status: savedSchedule.status,
-      dbHost: mongoose.connection.host,
-      dbName: mongoose.connection.db.databaseName
+    const updatedSchedule = await prisma.schedule.update({
+      where: { id: req.params.id },
+      data: { status: 'active' },
+      include: {
+        selectedAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        },
+        principalAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        },
+        secondaryAccounts: {
+          select: { id: true, email: true, channelTitle: true, status: true }
+        }
+      }
     });
 
-    // 3. Try to re-setup the job
-    try {
-      await setupScheduleJob(schedule._id);
-    } catch (error) {
-      console.error('❌ Error setting up schedule job:', error);
-      schedule.status = 'error';
-      await schedule.save();
+    // Use centralized cache invalidation and job management
+    await updateScheduleCache(updatedSchedule.id);
 
-      return res.status(500).json({
-        message: 'Error setting up schedule job',
-        error: error.message,
-        schedule
-      });
-    }
+    const formattedSchedule = formatScheduleResponse(updatedSchedule);
 
-    // 4. Re-fetch fresh data from DB
-    const freshSchedule = await ScheduleModel.findOne({
-      _id: req.params.id,
-      user: req.user.id
-    }).populate('selectedAccounts', 'email channelTitle status').lean();
-
-    const comments = await CommentModel.find({
-      user: req.user.id,
-      'metadata.scheduleId': req.params.id
-    }).sort({ createdAt: -1 }).limit(100);
-
-    const detailData = {
-      schedule: freshSchedule,
-      comments
-    };
-
-    // 5. Invalidate and set Redis cache (schedule details)
-    await cacheService.clear(`user:${req.user.id}:schedules:*`);
-    await cacheService.deleteUserData(req.user.id, `schedule:${req.params.id}`);
-    await cacheService.setUserData(req.user.id, `schedule:${req.params.id}`, detailData, 300);
-
-    // 6. Update page 1 of schedule list in Redis
-    const page = 1;
-    const limit = 20;
-    const listQuery = { user: req.user.id };
-    const schedules = await ScheduleModel.find(listQuery)
-      .populate('selectedAccounts', 'email channelTitle status')
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
-
-    const total = await ScheduleModel.countDocuments(listQuery);
-    const paginatedData = {
-      schedules,
-      pagination: {
-        total,
-        page,
-        limit,
-        pages: Math.ceil(total / limit)
-      }
-    };
-
-    const listKey = `schedules:${req.user.id}:all:${page}:${limit}`;
-    await cacheService.setUserData(req.user.id, listKey, paginatedData, 300);
-
-    // 7. Send response
     res.json({
       message: 'Schedule resumed successfully',
-      schedule: freshSchedule
+      schedule: formattedSchedule
     });
 
   } catch (error) {
     next(error);
+  }
+};
+
+/**
+ * Mark a schedule as completed
+ */
+const completeSchedule = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    const schedule = await prisma.schedule.findUnique({
+      where: { id: id }
+    });
+
+    if (!schedule) {
+      return res.status(404).json({ message: 'Schedule not found' });
+    }
+
+    if (schedule.userId !== userId) {
+      return res.status(403).json({ message: 'Unauthorized' });
+    }
+
+    await prisma.schedule.update({
+      where: { id: id },
+      data: { status: 'completed' }
+    });
+
+    await cacheService.deleteUserData(userId, `schedule:${id}`);
+    await cacheService.clear(`user:${userId}:schedules:*`);
+
+    res.json({ message: 'Schedule marked as completed' });
+  } catch (error) {
+    console.error('Error completing schedule:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const retryFailedComments = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    // Verify ownership
+    const schedule = await prisma.schedule.findUnique({
+      where: { id: id }
+    });
+
+    if (!schedule) {
+      return res.status(404).json({ message: 'Schedule not found' });
+    }
+
+    if (schedule.userId !== userId) {
+      return res.status(403).json({ message: 'Unauthorized' });
+    }
+
+    const startProcessing = require('../services/scheduler.service').retryFailedComments;
+    const result = await startProcessing(id);
+
+    if (result.success) {
+      res.json(result);
+    } else {
+      res.status(400).json(result);
+    }
+  } catch (error) {
+    console.error('Error retrying failed comments:', error);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
@@ -660,5 +795,7 @@ module.exports = {
   updateSchedule,
   deleteSchedule: deleteScheduleHandler,
   pauseSchedule: pauseScheduleHandler,
-  resumeSchedule: resumeScheduleHandler
+  resumeSchedule: resumeScheduleHandler,
+  completeSchedule,
+  retryFailedComments
 };

@@ -1,7 +1,8 @@
 
 const express = require('express');
 const { authenticateJWT } = require('../middleware/auth.middleware');
-const { ProxyModel } = require('../models/proxy.model');
+const prisma = require('../services/prisma.service');
+const { checkProxyStatus } = require('../services/proxy.helper');
 
 const router = express.Router();
 
@@ -12,7 +13,9 @@ const router = express.Router();
  */
 router.get('/', authenticateJWT, async (req, res, next) => {
   try {
-    const proxies = await ProxyModel.find({ user: req.user.id });
+    const proxies = await prisma.proxy.findMany({
+      where: { userId: req.user.id }
+    });
     res.json({ proxies });
   } catch (error) {
     next(error);
@@ -27,23 +30,29 @@ router.get('/', authenticateJWT, async (req, res, next) => {
 router.post('/', authenticateJWT, async (req, res, next) => {
   try {
     const { host, port, username, password, protocol, notes } = req.body;
-    
-    const proxy = await ProxyModel.create({
-      user: req.user.id,
-      host,
-      port,
-      username,
-      password,
-      protocol: protocol || 'http',
-      notes,
-      status: 'active'
+    console.log('Creating proxy:', { host, port, protocol });
+
+    const proxy = await prisma.proxy.create({
+      data: {
+        userId: req.user.id,
+        proxy: `${host}:${port}${username ? `:${username}` : ''}${password ? `:${password}` : ''}`,
+        host,
+        port: parseInt(port),
+        username,
+        password,
+        protocol: protocol || 'http',
+        notes,
+        status: 'active'
+      }
     });
-    
-    res.status(201).json({ 
+    console.log('Proxy created:', proxy.id);
+
+    res.status(201).json({
       message: 'Proxy created successfully',
-      proxy 
+      proxy
     });
   } catch (error) {
+    console.error('Error creating proxy:', error);
     next(error);
   }
 });
@@ -56,32 +65,50 @@ router.post('/', authenticateJWT, async (req, res, next) => {
 router.put('/:id', authenticateJWT, async (req, res, next) => {
   try {
     const { host, port, username, password, protocol, status, notes } = req.body;
-    
-    const proxy = await ProxyModel.findOne({
-      _id: req.params.id,
-      user: req.user.id
+    console.log('Updating proxy ID:', req.params.id, 'Data:', req.body);
+
+    const proxy = await prisma.proxy.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user.id
+      }
     });
-    
+
     if (!proxy) {
+      console.warn('Proxy not found for update:', req.params.id);
       return res.status(404).json({ message: 'Proxy not found' });
     }
-    
-    // Update fields if provided
-    if (host) proxy.host = host;
-    if (port) proxy.port = port;
-    if (username !== undefined) proxy.username = username;
-    if (password !== undefined) proxy.password = password;
-    if (protocol) proxy.protocol = protocol;
-    if (status) proxy.status = status;
-    if (notes !== undefined) proxy.notes = notes;
-    
-    await proxy.save();
-    
-    res.json({ 
+
+    const updateData = {};
+    if (host) updateData.host = host;
+    if (port) updateData.port = parseInt(port);
+    if (username !== undefined) updateData.username = username;
+    if (password !== undefined) updateData.password = password;
+    if (protocol) updateData.protocol = protocol;
+    if (status) updateData.status = status;
+    if (notes !== undefined) updateData.notes = notes;
+
+    // Update the 'proxy' string field if host or port or creds changed
+    if (host || port || username !== undefined || password !== undefined) {
+      const h = host || proxy.host;
+      const p = port || proxy.port;
+      const u = username !== undefined ? username : proxy.username;
+      const pass = password !== undefined ? password : proxy.password;
+      updateData.proxy = `${h}:${p}${u ? `:${u}` : ''}${pass ? `:${pass}` : ''}`;
+    }
+
+    const updatedProxy = await prisma.proxy.update({
+      where: { id: req.params.id },
+      data: updateData
+    });
+    console.log('Proxy updated successfully:', updatedProxy.id);
+
+    res.json({
       message: 'Proxy updated successfully',
-      proxy 
+      proxy: updatedProxy
     });
   } catch (error) {
+    console.error('Error updating proxy:', error);
     next(error);
   }
 });
@@ -93,15 +120,21 @@ router.put('/:id', authenticateJWT, async (req, res, next) => {
  */
 router.delete('/:id', authenticateJWT, async (req, res, next) => {
   try {
-    const result = await ProxyModel.deleteOne({
-      _id: req.params.id,
-      user: req.user.id
+    const proxy = await prisma.proxy.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user.id
+      }
     });
-    
-    if (result.deletedCount === 0) {
+
+    if (!proxy) {
       return res.status(404).json({ message: 'Proxy not found' });
     }
-    
+
+    await prisma.proxy.delete({
+      where: { id: req.params.id }
+    });
+
     res.json({ message: 'Proxy deleted successfully' });
   } catch (error) {
     next(error);
@@ -115,22 +148,28 @@ router.delete('/:id', authenticateJWT, async (req, res, next) => {
  */
 router.post('/:id/check', authenticateJWT, async (req, res, next) => {
   try {
-    const proxy = await ProxyModel.findOne({
-      _id: req.params.id,
-      user: req.user.id
+    const proxy = await prisma.proxy.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user.id
+      }
     });
-    
+
     if (!proxy) {
       return res.status(404).json({ message: 'Proxy not found' });
     }
-    
-    const result = await ProxyModel.checkStatus(proxy._id);
-    
+
+    const result = await checkProxyStatus(proxy.id);
+
+    const updatedProxy = await prisma.proxy.findUnique({
+      where: { id: proxy.id }
+    });
+
     res.json({
       message: result.success ? 'Proxy is working' : 'Proxy check failed',
-      status: proxy.status,
-      lastChecked: proxy.lastChecked,
-      speed: proxy.connectionSpeed,
+      status: updatedProxy.status,
+      lastChecked: updatedProxy.lastChecked,
+      speed: updatedProxy.connectionSpeed,
       result
     });
   } catch (error) {
@@ -146,20 +185,21 @@ router.post('/:id/check', authenticateJWT, async (req, res, next) => {
 router.post('/bulk-check', authenticateJWT, async (req, res, next) => {
   try {
     const { proxyIds } = req.body;
-    
+
     if (!proxyIds || !Array.isArray(proxyIds)) {
       return res.status(400).json({ message: 'Invalid request. proxyIds array is required' });
     }
-    
-    // Check each proxy sequentially
+
     const results = [];
     for (const proxyId of proxyIds) {
       try {
-        const proxy = await ProxyModel.findOne({
-          _id: proxyId,
-          user: req.user.id
+        const proxy = await prisma.proxy.findFirst({
+          where: {
+            id: proxyId,
+            userId: req.user.id
+          }
         });
-        
+
         if (!proxy) {
           results.push({
             id: proxyId,
@@ -168,18 +208,22 @@ router.post('/bulk-check', authenticateJWT, async (req, res, next) => {
           });
           continue;
         }
-        
-        const checkResult = await ProxyModel.checkStatus(proxy._id);
-        
+
+        const checkResult = await checkProxyStatus(proxy.id);
+
+        const updatedProxy = await prisma.proxy.findUnique({
+          where: { id: proxy.id }
+        });
+
         results.push({
-          id: proxy._id,
-          host: proxy.host,
-          port: proxy.port,
-          protocol: proxy.protocol,
-          status: proxy.status,
+          id: updatedProxy.id,
+          host: updatedProxy.host,
+          port: updatedProxy.port,
+          protocol: updatedProxy.protocol,
+          status: updatedProxy.status,
           success: checkResult.success,
-          speed: proxy.connectionSpeed,
-          lastChecked: proxy.lastChecked
+          speed: updatedProxy.connectionSpeed,
+          lastChecked: updatedProxy.lastChecked
         });
       } catch (error) {
         results.push({
@@ -189,7 +233,7 @@ router.post('/bulk-check', authenticateJWT, async (req, res, next) => {
         });
       }
     }
-    
+
     res.json({ results });
   } catch (error) {
     next(error);

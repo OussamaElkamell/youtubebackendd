@@ -1,9 +1,9 @@
 
 
 const { createClient } = require('redis');
- let redisClient;
+let redisClient;
 async function initRedis() {
-   
+
 
   try {
     if (redisClient?.isOpen) return true;
@@ -11,7 +11,7 @@ async function initRedis() {
     redisClient = createClient({
       url: process.env.REDIS_URL,
       socket: {
-        tls: {},
+        tls: process.env.REDIS_URL?.startsWith('rediss:'),
         reconnectStrategy: (retries) => Math.min(retries * 100, 5000)
       },
       commandsQueueMaxLength: 1000,
@@ -33,5 +33,5 @@ module.exports = {
 
   initRedis,
   redisClient: () => redisClient,
-  
+
 };

@@ -12,7 +12,7 @@
 function getRandomSubset(accounts, count) {
   if (!accounts || accounts.length === 0) return [];
   if (count >= accounts.length) return [...accounts];
-  
+
   const shuffled = [...accounts].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, count);
 }
@@ -26,18 +26,25 @@ function getRandomSubset(accounts, count) {
  * @returns {Object} - Rotation result with new selected accounts and rotation state
  */
 async function rotateAccountsForSleepCycle(schedule) {
-  const { accountCategories, accountRotation, selectedAccounts } = schedule;
-  
-  if (!accountRotation?.enabled || !accountCategories) {
-    console.log('[Account Rotation] Rotation not enabled or no categories defined');
+  const { accountCategories, rotationEnabled, currentlyActive, selectedAccounts } = schedule;
+
+  if (!rotationEnabled) {
+    console.log('[Account Rotation] Rotation not enabled');
     return null;
   }
 
-  const principal = accountCategories.principal.map(id => id.toString());
-  const secondary = accountCategories.secondary.map(id => id.toString());
-  
+  // Support both Prisma (principalAccounts/secondaryAccounts) and legacy (accountCategories)
+  let principal = (schedule.principalAccounts || []).map(a => a.id || a);
+  let secondary = (schedule.secondaryAccounts || []).map(a => a.id || a);
+
+  // Fallback to accountCategories if principal/secondary relations are missing
+  if (principal.length === 0 && secondary.length === 0 && accountCategories) {
+    principal = (accountCategories.principal || []).map(a => a.id || a);
+    secondary = (accountCategories.secondary || []).map(a => a.id || a);
+  }
+
   if (principal.length === 0 || secondary.length === 0) {
-    console.log('[Account Rotation] Missing principal or secondary accounts');
+    console.log('[Account Rotation] Missing principal or secondary accounts data');
     return null;
   }
 
@@ -47,67 +54,67 @@ async function rotateAccountsForSleepCycle(schedule) {
     secondary.length
   );
 
-  console.log(`[Account Rotation] Current active: ${accountRotation.currentlyActive}, Rotation count: ${rotationCount}`);
+  console.log(`[Account Rotation] Current active: ${currentlyActive}, Rotation count: ${rotationCount}`);
 
-  if (accountRotation.currentlyActive === 'principal') {
+  // Get current selected account IDs
+  const currentSelectedIds = selectedAccounts.map(a => a.id || a);
+
+  if (currentlyActive === 'principal') {
     // Switch TO secondary accounts
-    const currentSelected = selectedAccounts.map(id => id.toString());
-    
     // Select random principal accounts from currently selected ones
-    const principalInSelected = currentSelected.filter(id => principal.includes(id));
+    const principalInSelected = currentSelectedIds.filter(id => principal.includes(id));
     const randomPrincipalIds = getRandomSubset(principalInSelected, rotationCount);
-    
+
     // Select random secondary accounts
     const randomSecondaryIds = getRandomSubset(secondary, rotationCount);
-    
+
     // Create new selected accounts list: remove rotated principal, add secondary
     const newSelectedAccounts = [
-      ...currentSelected.filter(id => !randomPrincipalIds.includes(id)),
+      ...currentSelectedIds.filter(id => !randomPrincipalIds.includes(id)),
       ...randomSecondaryIds
     ];
-    
+
     console.log(`[Account Rotation] 🔄 Switching TO secondary:`);
     console.log(`  - Rotated out principal: ${randomPrincipalIds.length} accounts`);
     console.log(`  - Rotated in secondary: ${randomSecondaryIds.length} accounts`);
-    
+
     return {
       newSelectedAccounts,
       rotatedPrincipalIds: randomPrincipalIds,
       rotatedSecondaryIds: randomSecondaryIds,
       newActiveCategory: 'secondary'
     };
-    
+
   } else {
     // Switch BACK TO principal accounts (use different ones than last time)
-    const currentSelected = selectedAccounts.map(id => id.toString());
-    const previouslyRotatedSecondary = (accountRotation.rotatedSecondaryIds || []).map(id => id.toString());
-    const previouslyRotatedPrincipal = (accountRotation.rotatedPrincipalIds || []).map(id => id.toString());
-    
+    const previouslyRotatedSecondary = (schedule.rotatedSecondary || []).map(a => a.id || a);
+    const previouslyRotatedPrincipal = (schedule.rotatedPrincipal || []).map(a => a.id || a);
+
     // Try to get different principal accounts than last rotation
-    const availablePrincipal = principal.filter(id => 
-      !previouslyRotatedPrincipal.includes(id) && !currentSelected.includes(id)
+    const availablePrincipal = principal.filter(id =>
+      !previouslyRotatedPrincipal.includes(id) && !currentSelectedIds.includes(id)
     );
-    
+
     // If not enough new ones, use any principal accounts
-    const poolToUse = availablePrincipal.length >= previouslyRotatedSecondary.length 
-      ? availablePrincipal 
-      : principal.filter(id => !currentSelected.includes(id));
-    
+    const poolToUse = availablePrincipal.length >= previouslyRotatedSecondary.length
+      ? availablePrincipal
+      : principal.filter(id => !currentSelectedIds.includes(id));
+
     const newRandomPrincipalIds = getRandomSubset(
       poolToUse.length > 0 ? poolToUse : principal,
-      previouslyRotatedSecondary.length
+      previouslyRotatedSecondary.length || rotationCount
     );
-    
+
     // Create new selected accounts list: remove secondary, add new principal
     const newSelectedAccounts = [
-      ...currentSelected.filter(id => !previouslyRotatedSecondary.includes(id)),
+      ...currentSelectedIds.filter(id => !previouslyRotatedSecondary.includes(id)),
       ...newRandomPrincipalIds
     ];
-    
+
     console.log(`[Account Rotation] 🔄 Switching BACK TO principal:`);
     console.log(`  - Rotated out secondary: ${previouslyRotatedSecondary.length} accounts`);
     console.log(`  - Rotated in principal: ${newRandomPrincipalIds.length} accounts`);
-    
+
     return {
       newSelectedAccounts,
       rotatedPrincipalIds: newRandomPrincipalIds,
@@ -123,40 +130,40 @@ async function rotateAccountsForSleepCycle(schedule) {
  * @param {Boolean} enabled - Whether rotation is enabled
  * @returns {Object} - Validation result with isValid and error message
  */
-function validateRotationConfig(accountCategories, enabled) {
+function validateRotationConfig(accountCategories, enabled, schedule = {}) {
   if (!enabled) {
     return { isValid: true };
   }
 
-  if (!accountCategories) {
-    return { 
-      isValid: false, 
-      error: 'Account categories are required when rotation is enabled' 
+  // Support both Prisma and legacy
+  let principal = (schedule.principalAccounts || []).map(a => a.id || a);
+  let secondary = (schedule.secondaryAccounts || []).map(a => a.id || a);
+
+  if (principal.length === 0 && secondary.length === 0 && accountCategories) {
+    principal = (accountCategories.principal || []).map(a => a.id || a);
+    secondary = (accountCategories.secondary || []).map(a => a.id || a);
+  }
+
+  if (principal.length === 0) {
+    return {
+      isValid: false,
+      error: 'At least one principal account is required when rotation is enabled'
     };
   }
 
-  const { principal, secondary } = accountCategories;
-
-  if (!principal || principal.length === 0) {
-    return { 
-      isValid: false, 
-      error: 'At least one principal account is required when rotation is enabled' 
-    };
-  }
-
-  if (!secondary || secondary.length === 0) {
-    return { 
-      isValid: false, 
-      error: 'At least one secondary account is required when rotation is enabled' 
+  if (secondary.length === 0) {
+    return {
+      isValid: false,
+      error: 'At least one secondary account is required when rotation is enabled'
     };
   }
 
   // Require at least 30% of principal count as secondary accounts
   const minSecondaryCount = Math.ceil(principal.length * 0.3);
   if (secondary.length < minSecondaryCount) {
-    return { 
-      isValid: false, 
-      error: `You need at least ${minSecondaryCount} secondary accounts (30% of ${principal.length} principal accounts)` 
+    return {
+      isValid: false,
+      error: `You need at least ${minSecondaryCount} secondary accounts (30% of ${principal.length} principal accounts)`
     };
   }
 
