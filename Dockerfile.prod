@@ -8,6 +8,8 @@ RUN npm ci --omit=dev
 
 COPY . .
 
+RUN npx prisma generate
+
 EXPOSE 8005
 
 CMD ["node", "index.js"]
