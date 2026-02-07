@@ -472,7 +472,9 @@ async function handleIntervalSchedule(schedule, scheduleId) {
     return intervalMs;
   } catch (error) {
     console.error(`[Schedule ${scheduleId}] Error in handleIntervalSchedule:`, error);
-    return null; // Change error handling to return null
+    // 🛡️ CRITICAL: Never return null on error, return base configuration interval to keep schedule ALIVE
+    const baseInterval = calculateIntervalMs(schedule.interval || { value: 60, unit: 'minutes' });
+    return baseInterval;
   }
 }
 
@@ -711,15 +713,26 @@ commentWorker = new Worker('post-comment', async (job) => {
 
     } else if (proxyError) {
       const currentAccount = await prisma.youTubeAccount.findUnique({
-        where: { id: comment.youtubeAccountId }
+        where: { id: comment.accountId }
       });
       const newCount = (currentAccount?.proxyErrorCount || 0) + 1;
+      const threshold = currentAccount?.proxyErrorThreshold || 20; // Increased default to 20
+
       updateFields.proxyErrorCount = newCount;
-      updateFields.status = newCount >= 10 ? 'inactive' : 'active';
+      updateFields.status = newCount >= threshold ? 'inactive' : 'active';
+
+      console.log(`[ProxyError] Account ${comment.accountId} count: ${newCount}/${threshold}. Rotating proxy...`);
+
+      // Rotate proxy to give account a chance with a different one
+      try {
+        await assignRandomProxy(comment.userId, comment.accountId);
+      } catch (proxyError) {
+        console.warn(`[ProxyRotation] Failed to rotate proxy for account ${comment.accountId}: ${proxyError.message}`);
+      }
 
     } else if (duplication) {
       const currentAccount = await prisma.youTubeAccount.findUnique({
-        where: { id: comment.youtubeAccountId }
+        where: { id: comment.accountId }
       });
       const newCount = (currentAccount?.duplicationCount || 0) + 1;
       updateFields.duplicationCount = newCount;
@@ -1117,8 +1130,18 @@ async function optimizedProcessSchedule(scheduleId) {
       }
     }
     const startTime = Date.now();
-    // ✅ Process schedule accounts
-    await optimizedAccountProcessing(schedule, targetVideos, globalIntervalMs);
+    // ✅ Process schedule accounts (Safeguarded)
+    try {
+      await optimizedAccountProcessing(schedule, targetVideos, globalIntervalMs);
+    } catch (processError) {
+      console.error(`[Schedule ${scheduleId}] ❌ Error in account processing:`, processError);
+      // We do NOT stop the schedule for processing errors (timeouts, proxy issues, etc.)
+      // We just log it and verify if we need to incremement error count
+      await prisma.schedule.update({
+        where: { id: scheduleId },
+        data: { errorCount: { increment: 1 } }
+      });
+    }
 
 
     // ✅ RECURSIVE DELAY: Queue exactly ONE future job after this one is done
@@ -1157,7 +1180,9 @@ async function optimizedProcessSchedule(scheduleId) {
 
       if (currentStatus?.status === 'active') {
         const errorCount = (currentStatus.errorCount || 0) + 1;
-        const newStatus = errorCount >= 3 ? 'requires_review' : 'error';
+        // RELAXED THRESHOLD: Only stop schedule after 50 consecutive failures to allow for transient issues.
+        // Otherwise, keep 'active' so it retries.
+        const newStatus = errorCount >= 50 ? 'requires_review' : 'active';
 
         await prisma.schedule.update({
           where: { id: scheduleId },
