@@ -1762,8 +1762,19 @@ async function updateProfileQuota(youtubeAccountId) {
  * Calculate interval in milliseconds
  */
 function calculateIntervalMs(interval) {
-  const value = Number(interval?.value || 1);
-  const unit = interval?.unit || 'minutes'; // Default to minutes if missing
+  const unit = interval?.unit || 'minutes';
+  let value;
+
+  // Handle random interval if enabled and bounds exist
+  if (interval?.isRandom && interval.min !== undefined && interval.max !== undefined) {
+    const min = Number(interval.min);
+    const max = Number(interval.max);
+    // Calculate random value between min and max (inclusive)
+    value = Math.floor(Math.random() * (max - min + 1)) + min;
+  } else {
+    // Fallback to fixed value (or random value generated at creation if fixed value is 0)
+    value = Number(interval?.value || 1);
+  }
 
   if (isNaN(value)) return 60 * 1000;
 
