@@ -58,6 +58,8 @@ model Proxy {
   userId          String
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
+  proxyErrorCount Int              @default(0)
+  proxyErrorThreshold Int          @default(5)
   user            User             @relation(fields: [userId], references: [id])
   youtubeAccounts YouTubeAccount[]
 }

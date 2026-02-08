@@ -664,8 +664,8 @@ commentWorker = new Worker('post-comment', async (job) => {
     // Simplified commentWorker: no legacy view simulation logic here
     const result = await youtubeService.postComment(commentId);
 
-    const quotaExceeded = result.error?.includes("quota") || result.error?.includes("dailyLimitExceeded");
-    const proxyError = result.message?.includes("Proxy failed or invalid") || result.error?.includes("Proxy") || result.message === "Proxy failed or invalid";
+    const quotaExceeded = result.error?.toLowerCase().includes("quota") || result.error?.toLowerCase().includes("dailylimitexceeded");
+    const proxyError = result.message?.toLowerCase().includes("proxy") || result.error?.toLowerCase().includes("proxy");
     const duplication = result.message?.includes("No available accounts. Comment delayed for retry.") || result.error?.includes("Comment delayed for retry");
 
     const updateProgress = result.success
@@ -712,11 +712,38 @@ commentWorker = new Worker('post-comment', async (job) => {
       // to avoid interval creep.
 
     } else if (proxyError) {
+      // 🌐 Global Proxy Error Tracking
+      const accountWithProxy = await prisma.youTubeAccount.findUnique({
+        where: { id: comment.accountId },
+        include: { proxy: true }
+      });
+
+      if (accountWithProxy?.proxy) {
+        const proxy = accountWithProxy.proxy;
+        const newProxyErrorCount = (proxy.proxyErrorCount || 0) + 1;
+        const proxyThreshold = proxy.proxyErrorThreshold || 5;
+
+        console.log(`[ProxyError] Proxy ${proxy.host} count: ${newProxyErrorCount}/${proxyThreshold}`);
+
+        await prisma.proxy.update({
+          where: { id: proxy.id },
+          data: {
+            proxyErrorCount: newProxyErrorCount,
+            status: newProxyErrorCount >= proxyThreshold ? 'inactive' : 'active'
+          }
+        });
+
+        if (newProxyErrorCount >= proxyThreshold) {
+          console.log(`[ProxyError] Proxy ${proxy.host} reached threshold. Marking as INACTIVE.`);
+        }
+      }
+
+      // Account error tracking (Legacy remains but threshold is higher)
       const currentAccount = await prisma.youTubeAccount.findUnique({
         where: { id: comment.accountId }
       });
       const newCount = (currentAccount?.proxyErrorCount || 0) + 1;
-      const threshold = currentAccount?.proxyErrorThreshold || 20; // Increased default to 20
+      const threshold = currentAccount?.proxyErrorThreshold || 50; // High threshold for accounts on proxy errors
 
       updateFields.proxyErrorCount = newCount;
       updateFields.status = newCount >= threshold ? 'inactive' : 'active';
@@ -726,8 +753,8 @@ commentWorker = new Worker('post-comment', async (job) => {
       // Rotate proxy to give account a chance with a different one
       try {
         await assignRandomProxy(comment.userId, comment.accountId);
-      } catch (proxyError) {
-        console.warn(`[ProxyRotation] Failed to rotate proxy for account ${comment.accountId}: ${proxyError.message}`);
+      } catch (rotationError) {
+        console.warn(`[ProxyRotation] Failed to rotate proxy for account ${comment.accountId}: ${rotationError.message}`);
       }
 
     } else if (duplication) {
@@ -1613,14 +1640,29 @@ async function updateCommentStatus(commentId, result) {
     if (result.success) {
       const comment = await prisma.comment.findUnique({
         where: { id: commentId },
-        select: { accountId: true }
+        select: {
+          accountId: true,
+          youtubeAccount: {
+            select: { proxyId: true }
+          }
+        }
       });
 
       if (comment?.accountId) {
+        // Reset account proxy error count
         await prisma.youTubeAccount.update({
           where: { id: comment.accountId },
           data: { proxyErrorCount: 0 }
         });
+
+        // Reset proxy global error count
+        if (comment.youtubeAccount?.proxyId) {
+          await prisma.proxy.update({
+            where: { id: comment.youtubeAccount.proxyId },
+            data: { proxyErrorCount: 0 }
+          });
+          console.log(`[ProxySuccess] Resetting error count for proxy ${comment.youtubeAccount.proxyId}`);
+        }
       }
     }
   } catch (error) {
@@ -1748,6 +1790,11 @@ function scheduleQuotaReset() {
         // Reset API quotas
         prisma.apiProfile.updateMany({
           data: { usedQuota: 0, status: 'not exceeded', exceededAt: null }
+        }),
+        // Reactivate inactive proxies for a fresh start each day
+        prisma.proxy.updateMany({
+          where: { status: 'inactive' },
+          data: { status: 'active', proxyErrorCount: 0 }
         }),
         // Reactivate schedules that were stuck in error or quota exceeded, but NOT completed or paused
         prisma.schedule.updateMany({

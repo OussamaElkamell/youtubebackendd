@@ -50,6 +50,7 @@ async function createProxyAgent(proxy) {
           where: { id: proxy.id },
           data: {
             status: 'active',
+            proxyErrorCount: 0,
             notes: `${proxy.notes ? proxy.notes + ' | ' : ''}Reactivated by self-healing at ${new Date().toISOString()}`
           }
         });
