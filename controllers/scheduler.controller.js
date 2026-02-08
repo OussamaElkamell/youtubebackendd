@@ -274,14 +274,16 @@ const createSchedule = async (req, res, next) => {
     let intervalData;
     if (scheduleConfig?.interval) {
       const i = scheduleConfig.interval;
-      const minVal = i.minValue ?? i.min ?? 1;
-      const maxVal = i.maxValue ?? i.max ?? minVal;
+      const minVal = Number(i.minValue ?? i.min ?? 1);
+      const maxVal = Number(i.maxValue ?? i.max ?? minVal);
 
       intervalData = {
-        value: i.value === 0 ? randomBetween(minVal, maxVal) : i.value ?? 1,
+        value: (!!i.isRandom) ? randomBetween(minVal, maxVal) : Number(i.value ?? 1),
         unit: i.unit ?? 'minutes',
         min: minVal,
         max: maxVal,
+        minValue: minVal,
+        maxValue: maxVal,
         isRandom: !!i.isRandom
       };
     } else {
@@ -468,13 +470,15 @@ const updateSchedule = async (req, res, next) => {
     let intervalData;
     if (scheduleConfig?.interval) {
       const i = scheduleConfig.interval;
-      const minVal = i.minValue ?? i.min ?? 1;
-      const maxVal = i.maxValue ?? i.max ?? minVal;
+      const minVal = Number(i.minValue ?? i.min ?? 1);
+      const maxVal = Number(i.maxValue ?? i.max ?? minVal);
       intervalData = {
-        value: i.value === 0 ? randomBetween(minVal, maxVal) : i.value ?? 1,
+        value: (!!i.isRandom) ? randomBetween(minVal, maxVal) : Number(i.value ?? 1),
         unit: i.unit ?? 'minutes',
         min: minVal,
         max: maxVal,
+        minValue: minVal,
+        maxValue: maxVal,
         isRandom: !!i.isRandom
       };
     }
