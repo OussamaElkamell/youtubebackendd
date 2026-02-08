@@ -368,7 +368,19 @@ const createSchedule = async (req, res, next) => {
       minDelay: delaysData.minDelay,
       maxDelay: delaysData.maxDelay,
       betweenAccounts: delaysData.betweenAccounts,
-      limitComments: delaysData.limitComments,
+      limitComments: (() => {
+        const lc = delaysData.limitComments;
+        const minVal = Number(lc?.min ?? delaysData.minSleepComments ?? 0);
+        const maxVal = Number(lc?.max ?? delaysData.maxSleepComments ?? 0);
+        const isRandom = !!lc?.isRandom;
+
+        return {
+          value: isRandom ? randomBetween(minVal, maxVal) : Number(lc?.value ?? 0),
+          min: minVal,
+          max: maxVal,
+          isRandom: isRandom
+        };
+      })(),
       includeEmojis,
       status: 'active',
       useAI: useAI || false,
@@ -452,16 +464,15 @@ const updateSchedule = async (req, res, next) => {
         betweenAccounts: delays.betweenAccounts,
         limitComments: (() => {
           const lc = delays.limitComments;
-          const value = typeof lc === 'object' && lc !== null
-            ? lc.value
-            : lc === 0
-              ? randomBetween(delays.minSleepComments ?? 1, delays.maxSleepComments ?? 1)
-              : lc;
+          const minVal = Number(lc?.min ?? delays.minSleepComments ?? 0);
+          const maxVal = Number(lc?.max ?? delays.maxSleepComments ?? 0);
+          const isRandom = !!lc?.isRandom;
+
           return {
-            value: value ?? 0,
-            min: lc?.min ?? delays.minSleepComments ?? 0,
-            max: lc?.max ?? delays.maxSleepComments ?? 0,
-            isRandom: !!lc?.isRandom
+            value: isRandom ? randomBetween(minVal, maxVal) : Number(lc?.value ?? 0),
+            min: minVal,
+            max: maxVal,
+            isRandom: isRandom
           };
         })(),
       };
