@@ -43,25 +43,25 @@ model ApiProfile {
 }
 
 model Proxy {
-  id                  String           @id @default(uuid())
-  proxy               String
-  host                String
-  port                Int
-  username            String?
-  password            String?
-  protocol            String           @default("http")
-  status              String           @default("active")
-  location            String?
-  lastChecked         DateTime?
-  connectionSpeed     Int?
-  notes               String?
-  userId              String
-  createdAt           DateTime         @default(now())
-  updatedAt           DateTime         @updatedAt
-  proxyErrorCount     Int              @default(0)
-  proxyErrorThreshold Int              @default(5)
-  user                User             @relation(fields: [userId], references: [id])
-  youtubeAccounts     YouTubeAccount[]
+  id              String           @id @default(uuid())
+  proxy           String
+  host            String
+  port            Int
+  username        String?
+  password        String?
+  protocol        String           @default("http")
+  status          String           @default("active")
+  location        String?
+  lastChecked     DateTime?
+  connectionSpeed Int?
+  notes           String?
+  userId          String
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  proxyErrorCount Int              @default(0)
+  proxyErrorThreshold Int          @default(5)
+  user            User             @relation(fields: [userId], references: [id])
+  youtubeAccounts YouTubeAccount[]
 }
 
 model YouTubeAccount {
@@ -129,53 +129,54 @@ model Comment {
 }
 
 model Schedule {
-  id                    String           @id @default(uuid())
-  name                  String
-  status                String           @default("active")
-  commentTemplates      String[]
-  targetVideos          Json?
-  targetChannels        Json?
-  accountSelection      String           @default("specific")
-  scheduleType          String           @default("immediate")
-  startDate             DateTime?
-  endDate               DateTime?
-  cronExpression        String?
-  errorMessage          String?
-  interval              Json?
-  useAI                 Boolean          @default(false)
-  minDelay              Int              @default(0)
-  maxDelay              Int              @default(0)
-  betweenAccounts       Int              @default(0)
-  limitComments         Json?
-  totalComments         Int              @default(0)
-  postedComments        Int              @default(0)
-  failedComments        Int              @default(0)
-  includeEmojis         Boolean          @default(false)
-  userId                String
-  lastUsedAccountId     String?
-  rotationEnabled       Boolean          @default(false)
-  currentlyActive       String           @default("principal")
-  lastRotatedAt         DateTime?
-  createdAt             DateTime         @default(now())
-  updatedAt             DateTime         @updatedAt
-  lastFailureAt         DateTime?
-  scheduleConfig        Json?
-  errorCount            Int              @default(0)
-  lastProcessedAt       DateTime?
-  sleepDelayMinutes     Int              @default(0)
-  sleepDelayStartTime   DateTime?
-  simulateViews         Boolean          @default(false)
-  viewConfig            Json?
-  lastSleepTriggerCount Int?             @default(0)
-  nextRunAt             DateTime?
-  comments              Comment[]
-  lastUsedAccount       YouTubeAccount?  @relation("LastUsedAccount", fields: [lastUsedAccountId], references: [id])
-  user                  User             @relation(fields: [userId], references: [id])
-  principalAccounts     YouTubeAccount[] @relation("PrincipalAccounts")
-  rotatedPrincipal      YouTubeAccount[] @relation("RotatedPrincipalAccounts")
-  rotatedSecondary      YouTubeAccount[] @relation("RotatedSecondaryAccounts")
-  secondaryAccounts     YouTubeAccount[] @relation("SecondaryAccounts")
-  selectedAccounts      YouTubeAccount[] @relation("SelectedAccounts")
+  id                  String           @id @default(uuid())
+  name                String
+  status              String           @default("active")
+  commentTemplates    String[]
+  targetVideos        Json?
+  targetChannels      Json?
+  accountSelection    String           @default("specific")
+  scheduleType        String           @default("immediate")
+  startDate           DateTime?
+  endDate             DateTime?
+  cronExpression      String?
+  errorMessage        String?
+  interval            Json?
+  useAI               Boolean          @default(false)
+  minDelay            Int              @default(0)
+  maxDelay            Int              @default(0)
+  betweenAccounts     Int              @default(0)
+  limitComments       Json?
+  totalComments       Int              @default(0)
+  postedComments      Int              @default(0)
+  failedComments      Int              @default(0)
+  includeEmojis       Boolean          @default(false)
+  userId              String
+  lastUsedAccountId   String?
+  rotationEnabled     Boolean          @default(false)
+  currentlyActive     String           @default("principal")
+  lastRotatedAt       DateTime?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+  lastFailureAt       DateTime?
+  scheduleConfig      Json?
+  errorCount          Int              @default(0)
+  lastProcessedAt     DateTime?
+  nextRunAt           DateTime?
+  sleepDelayMinutes   Int              @default(0)
+  sleepDelayStartTime DateTime?
+  simulateViews       Boolean          @default(false)
+  viewConfig          Json?
+  comments            Comment[]
+  lastSleepTriggerCount Int? @default(0)
+
+  lastUsedAccount     YouTubeAccount?  @relation("LastUsedAccount", fields: [lastUsedAccountId], references: [id])
+  user                User             @relation(fields: [userId], references: [id])
+  principalAccounts   YouTubeAccount[] @relation("PrincipalAccounts")
+  rotatedPrincipal    YouTubeAccount[] @relation("RotatedPrincipalAccounts")
+  rotatedSecondary    YouTubeAccount[] @relation("RotatedSecondaryAccounts")
+  secondaryAccounts   YouTubeAccount[] @relation("SecondaryAccounts")
+  selectedAccounts    YouTubeAccount[] @relation("SelectedAccounts")
 }
 
 model ViewSchedule {
