@@ -1,0 +1,204 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id                   String           @id @default(uuid())
+  name                 String
+  email                String           @unique
+  password             String?
+  googleId             String?
+  googleEmail          String?
+  resetPasswordToken   String?
+  resetPasswordExpires DateTime?
+  lastLogin            DateTime?        @default(now())
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  comments             Comment[]
+  proxies              Proxy[]
+  schedules            Schedule[]
+  viewSchedules        ViewSchedule[]
+  youtubeAccounts      YouTubeAccount[]
+}
+
+model ApiProfile {
+  id              String           @id @default(uuid())
+  name            String
+  clientId        String
+  clientSecret    String
+  apiKey          String
+  redirectUri     String
+  isActive        Boolean          @default(false)
+  usedQuota       Int              @default(0)
+  limitQuota      Int              @default(10000)
+  status          String           @default("not exceeded")
+  exceededAt      DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  youtubeAccounts YouTubeAccount[]
+}
+
+model Proxy {
+  id                  String           @id @default(uuid())
+  proxy               String
+  host                String
+  port                Int
+  username            String?
+  password            String?
+  protocol            String           @default("http")
+  status              String           @default("active")
+  location            String?
+  lastChecked         DateTime?
+  connectionSpeed     Int?
+  notes               String?
+  userId              String
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+  proxyErrorCount     Int              @default(0)
+  proxyErrorThreshold Int              @default(5)
+  user                User             @relation(fields: [userId], references: [id])
+  youtubeAccounts     YouTubeAccount[]
+}
+
+model YouTubeAccount {
+  id                          String     @id @default(uuid())
+  email                       String
+  status                      String     @default("active")
+  channelId                   String?
+  channelTitle                String?
+  thumbnailUrl                String?
+  lastUsed                    DateTime?
+  dailyUsageDate              DateTime   @default(now())
+  commentCount                Int        @default(0)
+  likeCount                   Int        @default(0)
+  accessToken                 String?
+  refreshToken                String
+  tokenExpiry                 DateTime?
+  clientId                    String
+  clientSecret                String
+  redirectUri                 String
+  lastMessage                 String?
+  connectedDate               DateTime   @default(now())
+  isPosting                   Boolean    @default(false)
+  proxyErrorCount             Int        @default(0)
+  duplicationCount            Int        @default(0)
+  proxyErrorThreshold         Int        @default(5)
+  userId                      String
+  proxyId                     String?
+  apiProfileId                String
+  createdAt                   DateTime   @default(now())
+  updatedAt                   DateTime   @updatedAt
+  comments                    Comment[]
+  lastPostedByComments        Comment[]  @relation("LastPreviousAccount")
+  lastUsedInSchedules         Schedule[] @relation("LastUsedAccount")
+  apiProfile                  ApiProfile @relation(fields: [apiProfileId], references: [id])
+  proxy                       Proxy?     @relation(fields: [proxyId], references: [id])
+  user                        User       @relation(fields: [userId], references: [id])
+  principalInSchedules        Schedule[] @relation("PrincipalAccounts")
+  rotatedPrincipalInSchedules Schedule[] @relation("RotatedPrincipalAccounts")
+  rotatedSecondaryInSchedules Schedule[] @relation("RotatedSecondaryAccounts")
+  secondaryInSchedules        Schedule[] @relation("SecondaryAccounts")
+  schedules                   Schedule[] @relation("SelectedAccounts")
+}
+
+model Comment {
+  id                        String          @id @default(uuid())
+  videoId                   String
+  parentId                  String?
+  content                   String
+  status                    String          @default("pending")
+  scheduledFor              DateTime?
+  postedAt                  DateTime?
+  errorMessage              String?
+  retryCount                Int             @default(0)
+  youtubeCommentId          String?
+  userId                    String
+  accountId                 String
+  scheduleId                String
+  lastPreviousAccountId     String?
+  createdAt                 DateTime        @default(now())
+  updatedAt                 DateTime        @updatedAt
+  youtubeAccount            YouTubeAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  lastPreviousAccountPosted YouTubeAccount? @relation("LastPreviousAccount", fields: [lastPreviousAccountId], references: [id])
+  schedule                  Schedule        @relation(fields: [scheduleId], references: [id])
+  user                      User            @relation(fields: [userId], references: [id])
+}
+
+model Schedule {
+  id                    String           @id @default(uuid())
+  name                  String
+  status                String           @default("active")
+  commentTemplates      String[]
+  targetVideos          Json?
+  targetChannels        Json?
+  accountSelection      String           @default("specific")
+  scheduleType          String           @default("immediate")
+  startDate             DateTime?
+  endDate               DateTime?
+  cronExpression        String?
+  errorMessage          String?
+  interval              Json?
+  useAI                 Boolean          @default(false)
+  minDelay              Int              @default(0)
+  maxDelay              Int              @default(0)
+  betweenAccounts       Int              @default(0)
+  limitComments         Json?
+  totalComments         Int              @default(0)
+  postedComments        Int              @default(0)
+  failedComments        Int              @default(0)
+  includeEmojis         Boolean          @default(false)
+  userId                String
+  lastUsedAccountId     String?
+  rotationEnabled       Boolean          @default(false)
+  currentlyActive       String           @default("principal")
+  lastRotatedAt         DateTime?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+  lastFailureAt         DateTime?
+  scheduleConfig        Json?
+  errorCount            Int              @default(0)
+  lastProcessedAt       DateTime?
+  sleepDelayMinutes     Int              @default(0)
+  sleepDelayStartTime   DateTime?
+  simulateViews         Boolean          @default(false)
+  viewConfig            Json?
+  lastSleepTriggerCount Int?             @default(0)
+  nextRunAt             DateTime?
+  comments              Comment[]
+  lastUsedAccount       YouTubeAccount?  @relation("LastUsedAccount", fields: [lastUsedAccountId], references: [id])
+  user                  User             @relation(fields: [userId], references: [id])
+  principalAccounts     YouTubeAccount[] @relation("PrincipalAccounts")
+  rotatedPrincipal      YouTubeAccount[] @relation("RotatedPrincipalAccounts")
+  rotatedSecondary      YouTubeAccount[] @relation("RotatedSecondaryAccounts")
+  secondaryAccounts     YouTubeAccount[] @relation("SecondaryAccounts")
+  selectedAccounts      YouTubeAccount[] @relation("SelectedAccounts")
+}
+
+model ViewSchedule {
+  id              String    @id @default(uuid())
+  name            String
+  status          String    @default("active")
+  targetVideos    Json?
+  scheduleType    String    @default("immediate")
+  startDate       DateTime?
+  endDate         DateTime?
+  cronExpression  String?
+  interval        Json?
+  minWatchTime    Int       @default(30000)
+  maxWatchTime    Int       @default(120000)
+  probability     Int       @default(100)
+  totalViews      Int       @default(0)
+  completedViews  Int       @default(0)
+  failedViews     Int       @default(0)
+  userId          String
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  lastProcessedAt DateTime?
+  errorCount      Int       @default(0)
+  autoLike        Boolean   @default(false)
+  user            User      @relation(fields: [userId], references: [id])
+}
