@@ -1761,22 +1761,23 @@ async function updateProfileQuota(youtubeAccountId) {
 /**
  * Calculate interval in milliseconds
  */
+/**
+ * Calculate interval in milliseconds
+ */
 function calculateIntervalMs(interval) {
   const unit = interval?.unit || 'minutes';
-  let value;
+  let value = Number(interval?.value || 0);
 
-  // Handle random interval if enabled and bounds exist
-  if (interval?.isRandom && interval.min !== undefined && interval.max !== undefined) {
-    const min = Number(interval.min);
-    const max = Number(interval.max);
-    // Calculate random value between min and max (inclusive)
+  // Only randomize if value is not set (or is 0) and we have random bounds
+  // This prevents double-randomization since handleIntervalSchedule already sets a random value in the DB
+  const min = Number(interval?.min ?? interval?.minValue);
+  const max = Number(interval?.max ?? interval?.maxValue);
+
+  if (value <= 0 && interval?.isRandom && !isNaN(min) && !isNaN(max)) {
     value = Math.floor(Math.random() * (max - min + 1)) + min;
-  } else {
-    // Fallback to fixed value (or random value generated at creation if fixed value is 0)
-    value = Number(interval?.value || 1);
+  } else if (value <= 0) {
+    value = 1; // Default fallback
   }
-
-  if (isNaN(value)) return 60 * 1000;
 
   switch (unit) {
     case 'minutes': return value * 60 * 1000;
